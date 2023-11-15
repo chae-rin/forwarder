@@ -1,0 +1,1125 @@
+package com.illootech.forwarder.manager;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+
+import com.acidhan.frameworks.databases.rdbms.mariadb.handler.MariaDBHandler;
+import com.acidhan.frameworks.file.config.ConfigLoader;
+import com.acidhan.frameworks.file.log.Logger;
+import com.acidhan.frameworks.file.log.LoggerElements;
+import com.acidhan.frameworks.thread.RCThread;
+import com.illootech.forwarder.BootStrap;
+import com.illootech.forwarder.common.MessageQueue;
+import com.illootech.forwarder.common.ruleInformation;
+import com.illootech.forwarder.common.ruleMethodInformation;
+import com.illootech.forwarder.common.repository.BusinessQuery;
+import com.illootech.forwarder.generator.Generator;
+import com.illootech.forwarder.receiver.Receiver;
+import com.illootech.util.config.ConfigHandler;
+
+
+public class Manager extends RCThread
+{
+	/**
+	 * Process name & Thread delay
+	 */
+	private final String procname 	= "MANAGER";
+	private long threadDelay 		= 4000;
+
+	/**
+	 * Receiver, Generator, Deleter , Schedule memory DB updater thread count 
+	 */
+	private int receiverCount	= 0;
+	private int generatorCount 			= 0;
+	private Receiver[] receiverGroup 	= null;
+	private Generator[] generatorGroup 				= null;
+
+
+	/**
+	 * Message-Q
+	 */
+	public static MessageQueue mqGenerator 	= null;
+	public static long GENERATOR_MQ_LIMIT 	= 0L;
+
+	/**
+	 * MariaDB connection info
+	 */
+	public static String DB_TYPE_NAME = null;
+	public static String DB_IPS = null;
+	public static String DB_PORTS = null;
+	public static String DB_NAME = null;
+	public static String DB_USER = null;
+	public static String DB_PW = null;
+
+
+	/**
+	 * MariaDB connection
+	 */
+	private MariaDBHandler mariaDbHandler 	= null;
+	private Connection mariaConn 				= null;
+	private PreparedStatement[] mariaPsmtArr		= null;
+	private long dbSessionCheckIntervalMs 	= 5000;		
+	private long dbSessionCheckCount 		= 0;
+
+
+	/**
+	 * Config DB connection info
+	 */
+	private ConfigHandler confReader					= null;
+	public static String confId 					= null;
+	public static HashMap<String, String> CONF_MAP 	= null;
+	public static String CONF_DB_TYPE	= null;
+	public static String CONF_DB_IPS 	= null;
+	public static String CONF_DB_PORTS 	= null;
+	public static String CONF_DB_NAME 	= null;
+	public static String CONF_DB_USER 	= null;
+	public static String CONF_DB_PW 	= null;
+
+
+	/**
+	 * rule information 
+	 */
+	public static LinkedHashMap<String, ruleInformation> ruleInfo = null;
+	private long RULE_RELOAD_TIME = 5;
+	private long reloadDelayTime = 0L;
+
+	public void run()
+	{
+		try
+		{
+			if ( !this.loadProperty() )
+				return;
+
+			if ( !this.initMessageQueue() )
+				return;
+
+			if ( !this.initConfReader() )
+				return;
+
+			if( !this.confReader.initQuery() )
+				return;
+
+			if ( !this.initMariaDBConn() )
+				return;
+
+			if ( !this.initMariaSql() )
+				return;
+
+
+			while ( this.getLoopAllowFlag())
+			{
+				try
+				{
+					if( !this.readConfigFromDB() )
+					{
+						this.confReader.releaseQuery();
+						this.confReader.releaseDBConn();
+
+
+						//						if( !this.confReader.initDBConn( Manager.confId, 
+						//								 Manager.CONF_DB_TYPE, 
+						//								 Manager.CONF_DB_IPS, 
+						//								 Manager.CONF_DB_PORTS, 
+						//								 Manager.CONF_DB_NAME, 
+						//								 Manager.CONF_DB_USER, 
+						//								 Manager.CONF_DB_PW ) )
+						//							continue;
+
+						if( !this.confReader.initQuery() )
+							continue;
+					}
+
+					if ( !this.DBSessionCheck() )
+					{
+						this.releaseMariaSql();
+						this.releaseMariaDBConn();
+
+						if ( !this.initMariaDBConn() )
+							return;
+
+						if ( !this.initMariaSql() )
+							return;
+
+					}
+
+
+					if ( !this.dynamicSetLogLevel() )
+						continue;
+
+					if ( !this.settingConfig() )
+						continue;
+
+					if ( !this.loadRuleInfo() )
+						continue;
+
+					this.runGenerator();
+					this.runReceiver();
+
+				}
+				catch ( Exception e )
+				{
+					Logger.error( e );
+					continue;
+				}
+				finally
+				{
+					this.delay( this.threadDelay );
+
+					Logger.sysInfo(String.format(
+							"[%1$-20s][%2$-10s][Current thread count - Receiver: %3$d, Generator: %4$d. ]", 
+							this.procname,
+							"RUNNING",
+							this.receiverCount,
+							this.generatorCount ),
+							LoggerElements.LOG_LEVEL0 );
+
+					Logger.sysInfo(String.format(
+							"[%1$-20s][%2$-10s][Current message-Q size - %3$s: %4$d count(s). ]", 
+							this.procname,
+							"RUNNING",
+							Manager.mqGenerator.getQName(),
+							Manager.mqGenerator.qSize() ),
+							LoggerElements.LOG_LEVEL0 );
+				}
+			}
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+			return;
+		}
+		finally
+		{
+			this.releaseConfReader();
+			this.releaseMessageQueue();
+			this.releaseMariaSql();
+			this.releaseMariaDBConn();
+			this.shutdown();
+		}
+	}
+
+
+	private void runGenerator()
+	{
+		try
+		{
+			if ( this.generatorGroup == null )
+				this.generatorGroup = new Generator[ this.generatorCount ];
+
+			for ( int i = 0; i < this.generatorCount; i++ )
+			{
+				String name = String.format( "GEN-%1$03d", i );
+				if ( this.generatorGroup[i] == null )
+				{
+					this.generatorGroup[i] = new Generator( i, name );
+					this.generatorGroup[i].startup( name );
+
+					Logger.sysInfo(String.format(
+							"[%1$-20s][%2$-10s][%3$s IS STARTUP] - SUCCESS", 
+							this.procname,
+							"RUNNING", 
+							name),
+							LoggerElements.LOG_LEVEL1 );
+				}
+				else
+				{
+					if ( !this.generatorGroup[i].getLoopAllowFlag() )
+					{
+						this.generatorGroup[i] = null;
+
+						this.generatorGroup[i] = new Generator( i, name );
+						this.generatorGroup[i].startup( name );
+
+						Logger.sysInfo(String.format(
+								"[%1$-20s][%2$-10s][%3$s IS STARTUP : RESET] - SUCCESS", 
+								this.procname,
+								"RUNNING", 
+								name),
+								LoggerElements.LOG_LEVEL1 );
+					}
+				}
+			}
+
+			return;
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+			return;
+		}
+	}
+
+
+
+
+
+
+	private void runReceiver()
+	{
+		try
+		{
+			if ( this.receiverGroup == null )
+				this.receiverGroup = new Receiver[ this.receiverCount ];
+
+			for ( int i = 0; i < this.receiverCount; i++ )
+			{
+				String name = String.format( "RECVER-%1$03d", i );
+				if ( this.receiverGroup[i] == null )
+				{
+					this.receiverGroup[i] = new Receiver( i, name );
+					this.receiverGroup[i].startup( name );
+
+					Logger.sysInfo(String.format(
+							"[%1$-20s][%2$-10s][%3$s IS STARTUP] - SUCCESS", 
+							this.procname,
+							"RUNNING", 
+							name),
+							LoggerElements.LOG_LEVEL1 );
+				}
+				else
+				{
+					if ( !this.receiverGroup[i].getLoopAllowFlag() )
+					{
+						this.receiverGroup[i] = null;
+
+						this.receiverGroup[i] = new Receiver( i, name );
+						this.receiverGroup[i].startup( name );
+
+						Logger.sysInfo(String.format(
+								"[%1$-20s][%2$-10s][%3$s IS STARTUP : RESET] - SUCCESS", 
+								this.procname,
+								"RUNNING", 
+								name),
+								LoggerElements.LOG_LEVEL1 );
+					}
+				}
+			}
+
+			return;
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+			return;
+		}
+	}
+
+
+
+
+	private boolean loadRuleInfo()
+	{
+		boolean result = false;
+
+		ResultSet rs = null;
+		ruleInformation rule_info = null;
+		ruleMethodInformation rule_method_info = null;
+		try 
+		{
+			if( Manager.ruleInfo == null )	//초기 룰 정보 load
+			{
+				Manager.ruleInfo = new LinkedHashMap<String, ruleInformation>();
+
+				this.reloadDelayTime = System.currentTimeMillis();
+
+				rs = this.mariaPsmtArr[0].executeQuery();
+
+				if( rs == null )
+				{
+					Logger.sysInfo(String.format(
+							"[%1$-20s][%2$-10s][LoadRuleInfo. ResultSet is null. '%3$s' ] - FAIL", 
+							this.procname,
+							"ERROR",
+							BusinessQuery.SELECT_RULE_FUNC ), 
+							LoggerElements.LOG_LEVEL1 );
+
+					return false;
+				}
+
+				while( rs.next() )
+				{
+					String RULE_ID = rs.getString("RULE_ID") != null ? rs.getString("RULE_ID") : "";
+					String RULE_TYPE = rs.getString("RULE_TYPE") != null ? rs.getString("RULE_TYPE") : "";
+					String FUNC_SUB_ID = rs.getString("FUNC_SUB_ID") != null ? rs.getString("FUNC_SUB_ID") : "";
+					String RULE_IMPORTANCE = rs.getString("RULE_IMPORTANCE") != null ? rs.getString("RULE_IMPORTANCE") : "";
+					String FUNC_ID =  rs.getString("FUNC_ID") != null ? rs.getString("FUNC_ID") : "";
+
+
+
+					if(Manager.ruleInfo.get(RULE_ID) == null )
+					{
+						rule_info = new ruleInformation(RULE_ID, RULE_TYPE, RULE_IMPORTANCE);
+						Manager.ruleInfo.put( RULE_ID, rule_info );
+					}
+
+
+					if( !FUNC_SUB_ID.equals("") 
+							&& Manager.ruleInfo.get(RULE_ID).getFUNC_LIST().get(FUNC_SUB_ID) == null )
+					{
+						rule_method_info = new ruleMethodInformation(FUNC_ID, FUNC_SUB_ID);
+						
+						rule_method_info.setARG_VALUE( rs.getString("ARG_VALUE") != null ? rs.getString("ARG_VALUE") : "" );
+						rule_method_info.setBIND_ARGS( rs.getString("BIND_ARGS") != null ? rs.getString("BIND_ARGS") : "" );
+						rule_method_info.setQUERY_ID( rs.getString("QUERY_ID") != null ? rs.getString("QUERY_ID") : "" );
+						rule_method_info.setFUNC_MEMO( rs.getString("FUNC_MEMO") != null ? rs.getString("FUNC_MEMO") : "" );
+						rule_method_info.setQUERY( rs.getString("QUERY") != null ? rs.getString("QUERY") : "" );
+						
+						
+						Manager.ruleInfo.get(RULE_ID).getFUNC_LIST().put( FUNC_SUB_ID, rule_method_info );
+					}
+
+
+
+
+					Logger.sysInfo(String.format(
+							"[%1$-20s][%2$-10s][LoadRuleInfo. RULE_ID : '%3$s' , RULE_TYPE : '%4$s' , FUNC_SUB_ID : '%5$s' ]", 
+							this.procname,
+							"DEBUG",
+							RULE_ID,
+							RULE_TYPE,
+							FUNC_SUB_ID	), 
+							LoggerElements.LOG_LEVEL2 );
+
+					
+				}
+
+			}
+			else					// 룰 정보 재 load
+			{
+
+				long delayMinTime = System.currentTimeMillis() - this.reloadDelayTime;
+
+				delayMinTime = delayMinTime / ( 1000 * 60 );
+
+				if( delayMinTime >= this.RULE_RELOAD_TIME )
+				{
+
+					Logger.sysInfo(String.format(
+							"[%1$-20s][%2$-10s][ReloadRuleInfo. Reload Rule Information ] - SUCCESS", 
+							this.procname,
+							"RUNNING",
+							delayMinTime ), 
+							LoggerElements.LOG_LEVEL2 );
+
+
+					rs = this.mariaPsmtArr[1].executeQuery();
+
+					if( rs == null )
+					{
+						Logger.sysInfo(String.format(
+								"[%1$-20s][%2$-10s][ReloadRuleInfo. ResultSet is null. '%3$s' ] - FAIL", 
+								this.procname,
+								"ERROR",
+								BusinessQuery.SELECT_RULE_FUNC ), 
+								LoggerElements.LOG_LEVEL1 );
+
+						return false;
+					}
+
+					while( rs.next() )
+					{
+						String RULE_ID = rs.getString("RULE_ID") != null ? rs.getString("RULE_ID") : "";
+						String RULE_TYPE = rs.getString("RULE_TYPE") != null ? rs.getString("RULE_TYPE") : "";
+						String FUNC_SUB_ID = rs.getString("FUNC_SUB_ID") != null ? rs.getString("FUNC_SUB_ID") : "";
+						String RULE_IMPORTANCE = rs.getString("RULE_IMPORTANCE") != null ? rs.getString("RULE_IMPORTANCE") : "";
+						String FUNC_ID =  rs.getString("FUNC_ID") != null ? rs.getString("FUNC_ID") : "";
+
+
+
+						if(Manager.ruleInfo.get(RULE_ID) == null )
+						{
+							rule_info = new ruleInformation(RULE_ID, RULE_TYPE, RULE_IMPORTANCE);
+							synchronized ( Manager.ruleInfo ) 
+							{
+								Manager.ruleInfo.put( RULE_ID, rule_info );
+							}
+						}
+
+
+						if( !FUNC_SUB_ID.equals("") 
+								&& Manager.ruleInfo.get(RULE_ID).getFUNC_LIST().get(FUNC_SUB_ID) == null )
+						{
+							rule_method_info = new ruleMethodInformation(FUNC_ID, FUNC_SUB_ID);
+							
+							rule_method_info.setARG_VALUE( rs.getString("ARG_VALUE") != null ? rs.getString("ARG_VALUE") : "" );
+							rule_method_info.setBIND_ARGS( rs.getString("BIND_ARGS") != null ? rs.getString("BIND_ARGS") : "" );
+							rule_method_info.setQUERY_ID( rs.getString("QUERY_ID") != null ? rs.getString("QUERY_ID") : "" );
+							rule_method_info.setFUNC_MEMO( rs.getString("FUNC_MEMO") != null ? rs.getString("FUNC_MEMO") : "" );
+							rule_method_info.setQUERY( rs.getString("QUERY") != null ? rs.getString("QUERY") : "" );
+							
+							synchronized ( Manager.ruleInfo.get(RULE_ID).getFUNC_LIST() ) 
+							{
+								Manager.ruleInfo.get(RULE_ID).getFUNC_LIST().put( FUNC_SUB_ID, rule_method_info );
+							}
+						}
+
+
+
+						Logger.sysInfo(String.format(
+								"[%1$-20s][%2$-10s][ReloadRuleInfo. RULE_ID : '%3$s' , RULE_TYPE : '%4$s' , FUNC_SUB_ID : '%5$s' ]", 
+								this.procname,
+								"DEBUG",
+								RULE_ID,
+								RULE_TYPE,
+								FUNC_SUB_ID	), 
+								LoggerElements.LOG_LEVEL2 );
+
+
+					}
+
+					this.reloadDelayTime = System.currentTimeMillis();
+
+				}
+				else
+				{
+					Logger.sysInfo(String.format(
+							"[%1$-20s][%2$-10s][ReloadRuleInfo. Load time has passed %3$s min ] - PASS", 
+							this.procname,
+							"RUNNING",
+							delayMinTime ), 
+							LoggerElements.LOG_LEVEL2 );
+				}
+
+			}
+
+
+			result = true;
+			return result;
+		} 
+		catch (Exception e) 
+		{
+			Logger.error( e );
+			return false;
+		}
+		finally
+		{
+			if( rs != null )
+			{
+				try { rs.close(); } catch (SQLException e) { Logger.error( e );	}
+				rs = null;
+			}
+
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][loadRuleInfo. Load Rule Info Data ] - %3$s", 
+					this.procname, 
+					( result ? "RUNNING" : "ERROR" ), 
+					( result ? "SUCCESS" : "FAIL" ) ),
+					LoggerElements.LOG_LEVEL1 );
+
+		}
+	}
+
+
+
+
+	private boolean initMessageQueue()
+	{
+		boolean result = false;
+
+		try
+		{
+			if ( Manager.mqGenerator == null )
+				Manager.mqGenerator = new MessageQueue();
+
+			if ( !Manager.mqGenerator.init( "MQ.GEN" ) )
+				return result;
+
+			result = true;
+			return result;
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+			return false;
+		}
+		finally
+		{
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][Init message-Q. ] - %3$s", 
+					this.procname, 
+					( result ? "RUNNING" : "ERROR" ), 
+					( result ? "SUCCESS" : "FAIL" ) ),
+					LoggerElements.LOG_LEVEL1 );
+		}
+	}
+
+
+	private void releaseMessageQueue()
+	{
+		try
+		{
+			if ( Manager.mqGenerator != null )
+				Manager.mqGenerator.release();
+
+			return;
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+			return;
+		}
+		finally
+		{
+			Manager.mqGenerator = null;
+
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][Released message-Q. ]", 
+					this.procname, 
+					"RUNNING" ),
+					LoggerElements.LOG_LEVEL1 );
+		}
+	}
+
+
+	private boolean initConfReader()
+	{
+		boolean result = false;
+
+		try
+		{
+			if ( this.confReader == null )
+				this.confReader = new ConfigHandler("CONF.READER");
+
+			if( !this.confReader.initDBConn( Manager.confId, 
+					Manager.CONF_DB_TYPE, 
+					Manager.CONF_DB_IPS, 
+					Manager.CONF_DB_PORTS, 
+					Manager.CONF_DB_NAME, 
+					Manager.CONF_DB_USER, 
+					Manager.CONF_DB_PW ) )
+				return result;
+
+			if ( !this.confReader.initQuery() )
+				return result;
+
+			result = true;
+			return result;
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+			return false;
+		}
+		finally
+		{
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][Init configuration reader. ] - %3$s", 
+					this.procname, 
+					( result ? "RUNNING" : "ERROR" ), 
+					( result ? "SUCCESS" : "FAIL" ) ),
+					LoggerElements.LOG_LEVEL1 );
+		}
+	}
+
+
+	private void releaseConfReader()
+	{
+		try
+		{
+			if ( this.confReader != null )
+			{
+				this.confReader.releaseQuery();
+				this.confReader.releaseDBConn();
+			}
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+		}
+		finally
+		{
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][Released configuration reader. ]", 
+					this.procname, 
+					"RUNNING" ),
+					LoggerElements.LOG_LEVEL1 );
+		}
+	}
+
+
+
+
+	private boolean dynamicSetLogLevel() 
+	{
+		boolean result	= false;
+
+		String tmpStr 	= null;
+		int curLogLevel = -1;
+
+		try 
+		{
+			tmpStr = Manager.CONF_MAP.get("system.log.level");
+			curLogLevel = ( tmpStr != null ) ? Integer.parseInt( tmpStr ) : 1;
+
+			if ( curLogLevel < 0 )
+				return result;
+
+			LoggerElements.setLevel( curLogLevel );
+
+			result = true;
+			return result;
+		}
+		catch ( Exception e ) 
+		{
+			Logger.error(e);
+			return false;
+		}
+		finally
+		{
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][Current log level: %3$s ]", 
+					this.procname,
+					"RUNNING",
+					curLogLevel ),
+					LoggerElements.LOG_LEVEL0 );
+		}
+	}
+
+
+	private boolean readConfigFromDB()
+	{
+		boolean result = false;
+
+		try
+		{
+			String name = "CONF.READER";
+			if ( this.confReader == null )
+				this.confReader = new ConfigHandler( name );
+
+			Manager.CONF_MAP = this.confReader.load();
+			if ( Manager.CONF_MAP == null || Manager.CONF_MAP.size() == 0 ) 
+			{
+				this.confReader = null;
+
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][After readConfigFromDB. Config Map is null or size : 0 ] - %3$s", 
+						this.procname, 
+						( result ? "RUNNING" : "ERROR" ),
+						( result ? "SUCCESS" : "FAIL" ) ), 
+						LoggerElements.LOG_LEVEL1 );
+				return result;
+			}
+
+			result = true;
+			return result;
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+			return false;
+		}
+		finally 
+		{
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][Reading Config From MariaDB. ] - %3$s", 
+					this.procname, 
+					( result ? "RUNNING" : "ERROR" ),
+					( result ? "SUCCESS" : "FAIL" ) ), 
+					LoggerElements.LOG_LEVEL1 );
+		}
+	}
+
+
+	private boolean loadProperty()
+	{
+		boolean result		= false;
+		ConfigLoader config = null;
+		String tmpStr 		= null;
+
+		try
+		{
+			config = new ConfigLoader( BootStrap.DEFAULT_CONFIG_FILE );
+
+			/**
+			 * Config DB connection info
+			 */
+			tmpStr = config.getStringTag( "conf.id" );
+			if ( tmpStr == null )
+				return result;
+			Manager.confId = tmpStr;
+
+			tmpStr = config.getStringTag( "conf.db.type" );
+			if ( tmpStr == null )
+				return result;
+			Manager.CONF_DB_TYPE = tmpStr;
+
+			tmpStr = config.getStringTag( "conf.db.ip" );
+			if ( tmpStr == null )
+				return result;
+			Manager.CONF_DB_IPS = tmpStr;
+
+			tmpStr = config.getStringTag( "conf.db.port" );
+			if ( tmpStr == null )
+				return result;
+			Manager.CONF_DB_PORTS = tmpStr;
+
+			tmpStr = config.getStringTag( "conf.db.name" );
+			if ( tmpStr == null )
+				return result;
+			Manager.CONF_DB_NAME = tmpStr;
+
+			tmpStr = config.getStringTag( "conf.db.user" );
+			if ( tmpStr == null )
+				return result;
+			Manager.CONF_DB_USER = tmpStr;
+
+			tmpStr = config.getStringTag( "conf.db.passwd" );
+			if ( tmpStr == null )
+				return result;
+			Manager.CONF_DB_PW = tmpStr;
+
+
+			result = true;
+			return result;
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+			return false;
+		}
+		finally
+		{
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][Load properties to memeory] - %3$s", 
+					this.getProcname(), 
+					( result ? "RUNNING" : "ERROR" ),
+					( result ? "SUCCESS" : "FAIL" ) ), 
+					LoggerElements.LOG_LEVEL1 );
+		}
+	}
+
+
+	private boolean settingConfig()
+	{
+		boolean result	= false;
+		String tmpStr 	= null;
+
+		try
+		{
+			/**
+			 * Thread delay
+			 */
+			tmpStr = Manager.CONF_MAP.get( "manager.process.checking.interval" );
+			if ( tmpStr == null )
+				return result;
+			this.threadDelay = Integer.parseInt(tmpStr);
+
+
+			tmpStr = Manager.CONF_MAP.get( "manager.rule.info.reload.time" );
+			if ( tmpStr == null )
+				return result;
+			this.RULE_RELOAD_TIME = Integer.parseInt(tmpStr);
+
+
+			/**
+			 * Message-Q limit count
+			 */
+			tmpStr = Manager.CONF_MAP.get( "mq.generator.limit" );
+			if ( tmpStr == null || tmpStr.trim().equals( "" ))
+				return result;
+			Manager.GENERATOR_MQ_LIMIT = Long.parseLong( tmpStr );
+
+
+
+			/**
+			 * Receiver, Generator thread count
+			 */
+			tmpStr = Manager.CONF_MAP.get( "gw.receiver.topic.partition.count" );
+			if ( tmpStr == null || tmpStr.trim().equals( "" ))
+				return result;
+			this.receiverCount = Integer.parseInt(tmpStr);
+
+			tmpStr = Manager.CONF_MAP.get( "generator.count" );
+			if ( tmpStr == null || tmpStr.trim().equals( "" ))
+				return result;
+			this.generatorCount = Integer.parseInt(tmpStr);
+
+
+			/**
+			 * MariaDB connection info
+			 */
+			tmpStr = Manager.CONF_MAP.get( "base.db.type" );
+			if ( tmpStr == null || tmpStr.trim().equals( "" ))
+				return result;
+			Manager.DB_TYPE_NAME = tmpStr;
+
+			tmpStr = Manager.CONF_MAP.get( "base.db.ip" );
+			if ( tmpStr == null || tmpStr.trim().equals( "" ))
+				return result;
+			Manager.DB_IPS = tmpStr.trim();
+
+			tmpStr = Manager.CONF_MAP.get( "base.db.port" );
+			if ( tmpStr == null || tmpStr.trim().equals( "" ))
+				return result;
+			Manager.DB_PORTS = tmpStr.trim();
+
+			tmpStr = Manager.CONF_MAP.get( "base.db.name" );
+			if ( tmpStr == null || tmpStr.trim().equals( "" ))
+				return result;
+			Manager.DB_NAME = tmpStr.trim();
+
+			tmpStr = Manager.CONF_MAP.get( "base.db.user" );
+			if ( tmpStr == null || tmpStr.trim().equals( "" ))
+				return result;
+			Manager.DB_USER = tmpStr.trim();
+
+			tmpStr = Manager.CONF_MAP.get( "base.db.passwd" );
+			if ( tmpStr == null || tmpStr.trim().equals( "" ))
+				return result;
+			Manager.DB_PW = tmpStr.trim();
+
+
+			result = true;
+			return result;
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+			return false;
+		}
+		finally
+		{
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][Setting config data to memory. ] - %3$s", 
+					this.getProcname(), 
+					( result ? "RUNNING" : "ERROR" ),
+					( result ? "SUCCESS" : "FAIL" ) ), 
+					LoggerElements.LOG_LEVEL1 );
+		}
+	}
+
+
+	public boolean initMariaDBConn()
+	{
+		boolean result = false;
+
+		try
+		{
+			if ( !Manager.CONF_DB_TYPE.trim().toUpperCase().equals("MARIADB") ) 
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][Init MariaDB connection. Database type is not MariaDB. ] - FAIL", 
+						this.procname, 
+						"ERROR" ), 
+						LoggerElements.LOG_LEVEL1 );
+				return result;
+			}
+
+			if ( this.mariaDbHandler == null )
+				this.mariaDbHandler = new MariaDBHandler();
+
+			if ( !this.mariaDbHandler.init(
+					Manager.CONF_DB_IPS,
+					Manager.CONF_DB_PORTS,
+					Manager.CONF_DB_NAME,
+					Manager.CONF_DB_USER,
+					Manager.CONF_DB_PW ) )
+				return result;
+
+			if ( !this.mariaDbHandler.connect() )
+				return result;
+
+			this.mariaConn = this.mariaDbHandler.getConn();
+			if ( this.mariaConn == null )
+				return result;
+
+			result = true;
+			return result;
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+			return false;
+		}
+		finally
+		{
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][Init MariaDB connection. ] - %3$s", 
+					this.procname, 
+					( result ? "RUNNING" : "ERROR" ),
+					( result ? "SUCCESS" : "FAIL" ) ), 
+					LoggerElements.LOG_LEVEL1 );
+		}
+	}
+
+
+	public void releaseMariaSql()
+	{
+		try
+		{
+			if ( this.mariaPsmtArr != null )
+			{
+				for ( int i=0; i<this.mariaPsmtArr.length; i++ )
+					this.mariaPsmtArr[i].close();
+			}
+
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+		}
+		finally
+		{
+			this.mariaPsmtArr = null;
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][Released MariaDB business-query. ] - SUCCESS", 
+					this.procname, 
+					"RUNNING" ), 
+					LoggerElements.LOG_LEVEL1 );
+		}
+	}
+
+
+
+
+
+	public void releaseMariaDBConn()
+	{
+		try
+		{
+			if ( !Manager.CONF_DB_TYPE.trim().toUpperCase().equals("MARIADB") ) 
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][Release MariaDB connection. Database type is not MariaDB. ] - FAIL", 
+						this.procname, 
+						"ERROR" ), 
+						LoggerElements.LOG_LEVEL1 );
+				return;
+			}
+
+			if ( this.mariaDbHandler != null )
+				this.mariaDbHandler.disconnect();
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+			return;
+		}
+		finally
+		{
+			this.mariaDbHandler = null;
+
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][Release MariaDB connection. ]", 
+					this.procname, 
+					"RUNNING"), 
+					LoggerElements.LOG_LEVEL1);
+		}
+	}
+
+
+
+
+
+	private boolean DBSessionCheck() 
+	{
+		boolean mariaResult = false;
+		boolean result = false;
+
+		try 
+		{
+			if ( ( this.dbSessionCheckIntervalMs / this.threadDelay ) >= this.dbSessionCheckCount )
+			{
+				this.dbSessionCheckCount++;
+				mariaResult = true;
+				result = mariaResult;
+				return result;
+			}
+			else
+			{
+				mariaResult = ( this.mariaDbHandler.isConnect() > 0 ? true : false );
+
+				this.dbSessionCheckCount = 0;
+
+			}
+
+
+			result = mariaResult;
+			return result;
+		}
+		catch ( Exception e ) 
+		{
+			Logger.error( e );
+			return false;
+		}
+		finally 
+		{
+			if ( this.dbSessionCheckCount == this.dbSessionCheckIntervalMs )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][MariaDB session check. Check interval '%3$d'. ] - %4$s", 
+						this.procname, 
+						( result ? "RUNNING" : "ERROR" ),
+						this.dbSessionCheckIntervalMs,
+						( result ? "SUCCESS" : "FAIL" ) ), 
+						LoggerElements.LOG_LEVEL1 );
+			}
+		}
+	}
+
+
+
+
+
+	public boolean initMariaSql()
+	{
+		boolean result = false;
+
+		try
+		{
+			if ( this.mariaConn == null )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][Init mariaDB business-sql. Connection is null. ] - FAIL", 
+						this.procname, 
+						"ERROR" ), 
+						LoggerElements.LOG_LEVEL1);
+				return result;
+			}
+
+
+			this.mariaPsmtArr = new PreparedStatement[2];
+
+			this.mariaPsmtArr[0] = this.mariaConn.prepareStatement( BusinessQuery.SELECT_RULE_FUNC );				// RULE 집계함수 info
+			this.mariaPsmtArr[1] = this.mariaConn.prepareStatement( BusinessQuery.SELECT_RULE_FUNC_RELOAD );		// RULE 집계함수 info reload
+
+
+			for ( int i=0; i<this.mariaPsmtArr.length; i++ )
+			{
+				if ( this.mariaPsmtArr[i] == null )
+				{
+					Logger.sysInfo(String.format(
+							"[%1$-20s][%2$-10s][Init mariaDB business-sql. PreparedStatement[%3$d] is null. ] - FAIL", 
+							this.procname, 
+							"ERROR",
+							i ), 
+							LoggerElements.LOG_LEVEL1 );
+					return result;
+				}
+			}
+
+
+			result = true;
+			return result;
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+			return false;
+		}
+		finally
+		{
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][Init mariaDB business-sql '%3$s'. ] - %4$s", 
+					this.procname, 
+					( result ? "RUNNING" : "ERROR" ),
+					this.getClass().getName(),
+					( result ? "SUCCESS" : "FAIL" ) ), 
+					LoggerElements.LOG_LEVEL1);
+		}
+	}
+}

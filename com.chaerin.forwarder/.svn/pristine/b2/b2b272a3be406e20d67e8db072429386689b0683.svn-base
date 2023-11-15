@@ -1,0 +1,433 @@
+package com.illootech.forwarder.common.ruleMethod;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.text.DateFormat;
+import java.text.SimpleDateFormat;
+import java.util.Calendar;
+import java.util.Date;
+import java.util.LinkedHashMap;
+import java.util.UUID;
+
+import com.acidhan.frameworks.file.log.Logger;
+import com.acidhan.frameworks.file.log.LoggerElements;
+import com.illootech.forwarder.common.repository.BusinessQuery;
+
+public class InsertBLX {
+	private Connection oracleConn = null;
+	private LinkedHashMap<String, byte[]> parsedTelegram = null;
+	private PreparedStatement[] psmt = null;
+	
+	private String CHNL_DSCD = "";
+	private final String[] DST_DSCD = { "06","02","01" };
+
+	public InsertBLX( Connection oracleConn , LinkedHashMap<String, byte[]> parsedTelegram  , String CHNL_DSCD)
+	{
+
+		this.oracleConn = oracleConn;
+		this.parsedTelegram = parsedTelegram;
+		this.CHNL_DSCD = CHNL_DSCD;
+		this.psmt = new PreparedStatement[3];
+	}
+
+
+
+	private boolean initSQLWCFFD120TH()
+	{
+		boolean result = false;
+
+		try 
+		{
+			if( this.oracleConn == null )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][initSQL. DB connection is null ] - FAIL", 
+						"BLIXNSERT",
+						"ERROR" ), 
+						LoggerElements.LOG_LEVEL1 );
+
+				return false;
+			}
+
+			this.psmt[0] = this.oracleConn.prepareStatement( BusinessQuery.INSERT_WCFFD120TH );
+
+
+			result = true;
+			return result;
+
+		}
+		catch (Exception e) 
+		{
+			Logger.error( e );
+			return false;
+		}
+
+	}
+	
+	
+	
+	
+	
+	private boolean initSQLWCFFD405TH()
+	{
+		boolean result = false;
+
+		try 
+		{
+			if( this.oracleConn == null )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][initSQL. DB connection is null ] - FAIL", 
+						"BLIXNSERT",
+						"ERROR" ), 
+						LoggerElements.LOG_LEVEL1 );
+
+				return false;
+			}
+
+			this.psmt[1] = this.oracleConn.prepareStatement( BusinessQuery.INSERT_WCFFD405TH );
+
+
+			result = true;
+			return result;
+
+		}
+		catch (Exception e) 
+		{
+			Logger.error( e );
+			return false;
+		}
+
+	}
+
+
+
+
+
+
+
+
+
+	public boolean insertWCFFD120TH()
+	{
+		boolean result = false;
+		String[] chnlDscdList = null;
+		String chnlDscd = "";
+		try 
+		{
+			if( this.selectWCFFD403TH() != 0 )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][Already WCFFD403TH has BL Data ] - PASS", 
+						"BLIXNSERT",
+						"RUNNING" ), 
+						LoggerElements.LOG_LEVEL1 );
+
+				
+				result = true;
+				return result;
+			}
+			
+			
+			if( !this.initSQLWCFFD120TH() )
+				return false;
+
+			if( this.psmt[0] == null )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][insertWCFFD120TH. PreparedStatement is null ] - FAIL", 
+						"BLIXNSERT",
+						"ERROR" ), 
+						LoggerElements.LOG_LEVEL1 );
+
+				return false;
+			}
+			chnlDscd = this.CHNL_DSCD;
+			chnlDscdList = this.CHNL_DSCD.split(",");
+			
+			if( chnlDscd.equals("A") )
+			{
+				chnlDscdList = this.DST_DSCD;
+			}
+			
+			Calendar cal = Calendar.getInstance();
+			cal.setTime( new Date() );
+			DateFormat df  = new SimpleDateFormat("yyyyMMddHHmmss");
+
+
+			String stDayHour = df.format(cal.getTime());
+
+			int aplyTerm = this.parsedTelegram.get("MTHD_APLY_TERM") != null ? Integer.parseInt( new String( this.parsedTelegram.get("MTHD_APLY_TERM") ) ) : 0; 
+
+			cal.add(Calendar.DATE, aplyTerm);
+			String edDayHour = df.format(cal.getTime());
+
+
+			for(int i = 0 ; i < chnlDscdList.length ; i++)
+			{
+				
+				if( !chnlDscd.equals("A") )
+				{
+					if( !this.insertWCFFD405TH(chnlDscdList[i]) )
+						return false;
+				}
+				
+				
+				String blocListTgtTpTmp = this.parsedTelegram.get("MTHD_BLOC_LIST_TGT_TP") != null ? new String( this.parsedTelegram.get("MTHD_BLOC_LIST_TGT_TP") ) : ""; 
+				String blocListTgtTp = this.parsedTelegram.get("MTHD_BLOC_LIST_TGT_TP") != null ? new String( this.parsedTelegram.get("MTHD_BLOC_LIST_TGT_TP") ) : "";
+				if( chnlDscdList[i].equals("06") )				// 승인계
+				{
+					if( blocListTgtTp.equals("01") )		// 카드번호
+						continue;
+				}
+				else if( chnlDscdList[i].equals("02") )			// W-pay
+				{
+					continue;
+				}
+				else if( chnlDscdList[i].equals("01") )			// VP
+				{
+					if     (blocListTgtTp.equals("01")) blocListTgtTpTmp = "06"; 	//카드번호
+					else if(blocListTgtTp.equals("02")) continue;             		//고객번호
+					else if(blocListTgtTp.equals("03")) blocListTgtTpTmp = "05"; 	//IP
+					else if(blocListTgtTp.equals("04")) blocListTgtTpTmp = "02"; 	//MAC
+					else if(blocListTgtTp.equals("05")) blocListTgtTpTmp = "03"; 	//HDD
+					else if(blocListTgtTp.equals("06")) continue;					//UUID			
+				}
+
+				int index = 1 ;
+				this.psmt[0].setString(index++, UUID.randomUUID().toString().replaceAll("-", ""));
+				this.psmt[0].setString(index++, this.parsedTelegram.get("MTHD_BLOC_LIST_TP") != null ? new String( this.parsedTelegram.get("MTHD_BLOC_LIST_TP") ) : "");
+				this.psmt[0].setString(index++, blocListTgtTpTmp);
+				this.psmt[0].setString(index++, this.parsedTelegram.get("MTHD_TGT_VAL") != null ? new String( this.parsedTelegram.get("MTHD_TGT_VAL") ) : "");
+				this.psmt[0].setString(index++, chnlDscdList[i]);
+				this.psmt[0].setString(index++, "01");
+				this.psmt[0].setString(index++, stDayHour);
+				this.psmt[0].setString(index++, edDayHour);
+
+				if( this.psmt[0].executeUpdate() < 1 )
+					return result;
+
+			}
+
+
+
+			result = true;
+			return result;
+
+		}
+		catch (Exception e) 
+		{
+			Logger.error( e );
+			return false;
+		}
+		finally
+		{
+			if( this.psmt[0] != null )
+			{
+				try { this.psmt[0].close(); } catch (SQLException e) { Logger.error( e );	}
+				this.psmt[0] = null;
+			}
+
+			if( this.oracleConn != null ) 
+				this.oracleConn = null;
+
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][insertWCFFD120TH. execute Insert Query ] - %3$s", 
+					"BLIXNSERT",
+					(result ? "RUNNING" : "ERROR"),
+					(result ? "SUCCESS" : "FAIL")), 
+					LoggerElements.LOG_LEVEL1 );
+		}
+	}
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	public boolean insertWCFFD405TH(String chnlDscd)
+	{
+		boolean result = false;
+
+		try 
+		{
+			if( !this.initSQLWCFFD405TH() )
+				return false;
+
+			if( this.psmt[1] == null )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][insertWCFFD405TH. PreparedStatement is null ] - FAIL", 
+						"BLIXNSERT",
+						"ERROR" ), 
+						LoggerElements.LOG_LEVEL1 );
+
+				return false;
+			}
+			
+			int index = 1;
+			this.psmt[1].setString(index++, this.parsedTelegram.get("MTHD_BLOC_LIST_TP") != null ? new String( this.parsedTelegram.get("MTHD_BLOC_LIST_TP") ) : "");
+			this.psmt[1].setString(index++, this.parsedTelegram.get("MTHD_BLOC_LIST_TGT_TP") != null ? new String( this.parsedTelegram.get("MTHD_BLOC_LIST_TGT_TP") ) : "");
+			this.psmt[1].setString(index++, this.parsedTelegram.get("MTHD_TGT_VAL") != null ? new String( this.parsedTelegram.get("MTHD_TGT_VAL") ) : "");
+			this.psmt[1].setString(index++, "Y");
+			this.psmt[1].setString(index++, chnlDscd);
+
+			if( this.psmt[1].executeUpdate() < 1 )
+				return result;
+
+
+
+			result = true;
+			return result;
+
+		}
+		catch (Exception e) 
+		{
+			Logger.error( e );
+			return false;
+		}
+		finally
+		{
+			if( this.psmt[1] != null )
+			{
+				try { this.psmt[1].close(); } catch (SQLException e) { Logger.error( e );	}
+				this.psmt[1] = null;
+			}
+
+			
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][insertWCFFD405TH. execute Insert Query ] - %3$s", 
+					"BLIXNSERT",
+					(result ? "RUNNING" : "ERROR"),
+					(result ? "SUCCESS" : "FAIL")), 
+					LoggerElements.LOG_LEVEL1 );
+		}
+	}
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	private boolean initSQLWCFFD403TH()
+	{
+		boolean result = false;
+
+		try 
+		{
+			if( this.oracleConn == null )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][initSQL. DB connection is null ] - FAIL", 
+						"BLIXNSERT",
+						"ERROR" ), 
+						LoggerElements.LOG_LEVEL1 );
+
+				return false;
+			}
+
+			this.psmt[2] = this.oracleConn.prepareStatement( BusinessQuery.SELECT_WCFFD403TH );
+
+
+			result = true;
+			return result;
+
+		}
+		catch (Exception e) 
+		{
+			Logger.error( e );
+			return false;
+		}
+
+	}
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	private int selectWCFFD403TH()
+	{
+		boolean result = false;
+		ResultSet rs = null;
+		
+		int cnt = -1;
+		try 
+		{
+			if( !this.initSQLWCFFD403TH() )
+				return -1;
+
+			if( this.psmt[2] == null )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][selectWCFFD403TH. PreparedStatement is null ] - FAIL", 
+						"BLIXNSERT",
+						"ERROR" ), 
+						LoggerElements.LOG_LEVEL1 );
+
+				return -1;
+			}
+			
+			int index = 1;
+			this.psmt[2].setString(index++, this.parsedTelegram.get("MTHD_BLOC_LIST_TP") != null ? new String( this.parsedTelegram.get("MTHD_BLOC_LIST_TP") ) : "");
+			this.psmt[2].setString(index++,  this.parsedTelegram.get("MTHD_BLOC_LIST_TGT_TP") != null ? new String( this.parsedTelegram.get("MTHD_BLOC_LIST_TGT_TP") ) : "");
+			this.psmt[2].setString(index++, this.parsedTelegram.get("MTHD_TGT_VAL") != null ? new String( this.parsedTelegram.get("MTHD_TGT_VAL") ) : "");
+
+			rs = this.psmt[2].executeQuery();
+			
+			if( rs == null )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][selectWCFFD403TH. ResultSet is null. '%3$s' ] - FAIL", 
+						"BLIXNSERT",
+						"ERROR",
+						BusinessQuery.SELECT_RULE_FUNC ), 
+						LoggerElements.LOG_LEVEL1 );
+
+				return -1;
+			}
+
+			if( rs.next() )
+			{
+				cnt = rs.getInt("CNT");
+			}
+
+
+			result = true;
+			return cnt;
+
+		}
+		catch (Exception e) 
+		{
+			Logger.error( e );
+			return -1;
+		}
+		finally
+		{
+			if( this.psmt[2] != null )
+			{
+				try { this.psmt[2].close(); } catch (SQLException e) { Logger.error( e );	}
+				this.psmt[2] = null;
+			}
+
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][selectWCFFD403TH. execute Insert Query ] - %3$s", 
+					"BLIXNSERT",
+					(result ? "RUNNING" : "ERROR"),
+					(result ? "SUCCESS" : "FAIL")), 
+					LoggerElements.LOG_LEVEL1 );
+		}
+	}
+
+}

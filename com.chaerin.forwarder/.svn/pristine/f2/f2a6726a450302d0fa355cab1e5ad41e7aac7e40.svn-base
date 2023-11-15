@@ -1,0 +1,408 @@
+package com.illootech.forwarder.receiver;
+
+import java.util.LinkedList;
+import java.util.Properties;
+
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+
+import com.acidhan.frameworks.collection.messageq.linear.IF_MessageDataSet;
+import com.acidhan.frameworks.file.log.Logger;
+import com.acidhan.frameworks.file.log.LoggerElements;
+import com.acidhan.frameworks.thread.RCThread;
+import com.illootech.forwarder.common.MessageDataSet;
+import com.illootech.forwarder.manager.Manager;
+
+public class Receiver extends RCThread
+{
+	/**
+	 * Thread delay & Process name
+	 */
+	private String procname		= "";
+	private long threadDelay 	= 1;
+	
+	/**
+	 * Message-Q limit retry interval ms
+	 */
+	private int mqRetryIntervalMs = 0;
+	
+	/**
+	 * Kafka Settings
+	 */
+	private KafkaConsumer<String, String> consumer	= null;;
+	private LinkedList<String> topicList 			= null;
+	private String bootstrapServers 				= null;
+	private String sessionTimeoutMs 				= null;
+	private String zookeeperSyncTimeMs 				= null;
+	private String groupId 							= null;
+	private String keyDeserializer 					= null;
+	private String valueDeserializer 				= null;
+	private final int pollingIntervalMs				= 1;
+	private String topic							= null;
+
+	
+	public Receiver( int id, String name )
+	{
+		this.procname 		= name;
+	}
+
+
+	public void run()
+	{
+		try
+		{
+			if ( !this.settingConfig() )
+				return;
+			
+			if ( !this.initBroker() )
+				return;
+			
+			
+			while ( this.getLoopAllowFlag() )
+			{
+				try
+				{
+					this.processing();
+				}
+				catch ( Exception e )
+				{
+					Logger.error( e );
+					return;
+				}
+				finally
+				{
+					this.delay( this.threadDelay );
+				}
+			}
+
+			return;
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+			return;
+		}
+		finally
+		{
+			this.releaseBroker();
+			this.shutdown();
+		}
+	}
+
+
+	private boolean processing()
+	{
+		boolean result = false;
+		ConsumerRecords<String, String> records = null;
+		
+		String strValue = null;
+		char[] valueChar = null;
+		int valueHeaderLen = -1;
+		
+		StringBuffer valueBuffer = new StringBuffer();
+		
+		try
+		{
+			records = this.consumer.poll( this.pollingIntervalMs );
+			if ( records == null )
+				return result;
+			
+			
+			for ( ConsumerRecord<String, String> record : records )
+			{
+				String readTopic = record.topic();
+				if ( this.topicList.contains( readTopic ) )
+				{
+					byte[] buff = record.value().getBytes();
+					
+					strValue = new String(record.value());
+					
+					valueChar = strValue.toCharArray();
+					
+					valueHeaderLen = Integer.parseInt((strValue).substring(0, 8)) + 8;
+										
+					valueChar[valueHeaderLen + 23] = '*';
+					valueChar[valueHeaderLen + 24] = '*';
+					valueChar[valueHeaderLen + 25] = '*';
+					valueChar[valueHeaderLen + 26] = '*';
+					valueChar[valueHeaderLen + 27] = '*';
+					valueChar[valueHeaderLen + 28] = '*';
+					valueChar[valueHeaderLen + 29] = '*';
+					valueChar[valueHeaderLen + 30] = '*';
+					
+					valueChar[valueHeaderLen + 515] = '*';
+					valueChar[valueHeaderLen + 516] = '*';
+					valueChar[valueHeaderLen + 517] = '*';
+					valueChar[valueHeaderLen + 518] = '*';
+					valueChar[valueHeaderLen + 519] = '*';
+					valueChar[valueHeaderLen + 520] = '*';
+					valueChar[valueHeaderLen + 521] = '*';
+					valueChar[valueHeaderLen + 522] = '*';
+					
+					valueBuffer.append(valueChar);
+					
+					Logger.sysInfo(String.format(
+							"[%1$-20s][%2$-10s][Received data from Illootech.G/W. Topic '%3$s' Key '%4$s' Partition '%5$04d' Data '%6$s' %7$d byte(s). ]", 
+							this.procname, 
+							"RUNNING", 
+							( record != null ? record.topic()					: "N/A" ),
+							( record != null ? record.key() 					: "N/A" ),
+							( record != null ? record.partition() 				: -1 ),
+							( record != null ? valueBuffer.toString()					: "N/A" ),
+							( record != null ? record.value().getBytes().length	: -1 ) ),
+							LoggerElements.LOG_LEVEL1 );
+					
+					this.putDataToMq( readTopic, buff );
+					buff = null;
+				}
+				else
+				{
+					Logger.sysInfo(String.format(
+							"[%1$-20s][%2$-10s][Received data from Illootech.G/W. Topic '%3$s' is not supported. ] - DROP", 
+							this.procname, 
+							"RUNNING" ),
+							LoggerElements.LOG_LEVEL1 );
+				}
+				
+				this.delay( 1 );
+			}
+
+			return result;
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+			return false;
+		}
+	}
+	
+	
+	private boolean putDataToMq( String topic, byte[] telegram )
+	{
+		boolean result = false;
+		IF_MessageDataSet telegramDataSet = null;
+		
+		try
+		{
+			if ( telegram == null )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][Put data to Message-Q '%3$s'. Data is not available. ] - FAIL", 
+						this.procname,
+						( result ? "RUNNING" : "ERROR" ),
+						( Manager.mqGenerator != null ? Manager.mqGenerator.getQName() : "N/A" )),
+						LoggerElements.LOG_LEVEL1 );
+				return result;
+			}
+			
+			
+			/**
+			 * Set telegram dataset
+			 */
+			telegramDataSet = new MessageDataSet();
+			telegramDataSet.setMessageId( topic );
+			telegramDataSet.setSourcePacket( telegram );
+
+			
+			/**
+			 * Check message-Q size
+			 */
+			while ( Manager.mqGenerator.qSize() >= Manager.GENERATOR_MQ_LIMIT )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][Put data to Message-Q. Stand-by..... '%3$s' is full { '%4$04d' limit }. Retry.interval '%5$04d' ms. ] - STAND-BY", 
+						this.procname,
+						"RUNNING",
+						( Manager.mqGenerator != null ? Manager.mqGenerator.getQName() : "N/A" ),
+						Manager.GENERATOR_MQ_LIMIT,
+						mqRetryIntervalMs ),
+						LoggerElements.LOG_LEVEL1 );
+				
+				this.delay( mqRetryIntervalMs );
+			}
+			
+			
+			result = Manager.mqGenerator.put( telegramDataSet );
+			return result;
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+			return false;
+		}
+		finally
+		{
+//			telegramDataSet = null;
+			
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][Put data to Message-Q '%3$s' Data '%4$s' Current.size '%5$04d' count(s) ]", 
+					this.procname,
+					( result 						? "RUNNING" 						: "ERROR" ),
+					( Manager.mqGenerator != null 	? Manager.mqGenerator.getQName() 	: "N/A" ),
+					( telegram != null && LoggerElements.getLevel() >= LoggerElements.LOG_LEVEL2 ? 	new String( telegram )	: "N/A" ),
+					( Manager.mqGenerator != null 	? Manager.mqGenerator.qSize() 		: -1 ) ),
+					LoggerElements.LOG_LEVEL1 );
+		}
+	}
+	
+	
+	private boolean initBroker()
+	{
+		boolean result = false;
+		
+		Properties configs = null;
+		
+		try
+		{
+			configs = new Properties();
+			configs.put( "bootstrap.servers"		, this.bootstrapServers );
+			configs.put( "session.timeout.ms"		, this.sessionTimeoutMs );
+			configs.put( "zookeeper.sync.time.ms"	, this.zookeeperSyncTimeMs );
+			configs.put( "group.id"					, this.groupId );
+			configs.put( "key.deserializer"			, this.keyDeserializer );
+			configs.put( "value.deserializer"		, this.valueDeserializer );
+
+			if ( this.consumer == null )
+				this.consumer = new KafkaConsumer<>( configs );
+			
+			this.topicList = new LinkedList<String>(); 
+			this.topicList.add( this.topic );
+
+			this.consumer.subscribe( this.topicList );
+			
+			result = true;
+			return result;
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+			return false;
+		}
+		finally
+		{
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][Init broker. Broker '%3$s' Group.id '%4$s' ] - %5$s", 
+					this.procname, 
+					( result 						? "RUNNING" 			: "ERROR" ), 
+					( this.bootstrapServers != null ? this.bootstrapServers : "N/A" ),
+					( this.groupId != null 			? this.groupId 			: "N/A" ),
+					( result 						? "SUCCESS" 			: "FAIL" ) ),
+					LoggerElements.LOG_LEVEL1 );
+		}
+	}
+	
+	
+	private void releaseBroker()
+	{
+		try
+		{
+			if ( this.topicList != null )
+				this.topicList.clear();
+			
+			if ( this.consumer != null )
+				this.consumer.close();
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+		}
+		finally
+		{
+			this.topicList	= null;
+			this.consumer 	= null;
+			
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][Release broker. ]", 
+					this.procname, 
+					"RUNNING" ),
+					LoggerElements.LOG_LEVEL1 );
+		}
+	}
+
+
+	private boolean settingConfig()
+	{
+		boolean result	= false;
+		String tmpStr 	= null;
+		int tmpInt		= -1;
+		
+		try
+		{
+			/**
+			 * Thread delay
+			 */
+			tmpStr = Manager.CONF_MAP.get( "receiver.process.checking.interval" );
+			tmpInt = ( tmpStr != null ) ? Integer.parseInt( tmpStr ) : -1;
+			if ( tmpInt < 0 )
+				return result;
+			this.threadDelay = tmpInt;
+			
+			
+			/**
+			 * Kafka consumer properties
+			 */
+			tmpStr = Manager.CONF_MAP.get( "gw.receiver.bootstrap.servers" );
+			if ( tmpStr == null )
+				return result;
+			this.bootstrapServers = tmpStr;
+			
+			tmpStr = Manager.CONF_MAP.get( "gw.receiver.session.timeout.ms" );
+			if ( tmpStr == null )
+				return result;
+			this.sessionTimeoutMs = tmpStr;
+			tmpStr = Manager.CONF_MAP.get( "gw.receiver.group.id" );
+			if ( tmpStr == null )
+				return result;
+			this.groupId = tmpStr;
+			
+			tmpStr = Manager.CONF_MAP.get( "gw.receiver.key.deserializer" );
+			if ( tmpStr == null )
+				return result;
+			this.keyDeserializer = tmpStr;
+
+			tmpStr = Manager.CONF_MAP.get( "gw.receiver.value.deserializer" );
+			if ( tmpStr == null )
+				return result;
+			this.valueDeserializer = tmpStr;
+			
+			tmpStr = Manager.CONF_MAP.get( "gw.receiver.zookeeper.sync.time.ms" );
+			if ( tmpStr == null )
+				return result;
+			this.zookeeperSyncTimeMs = tmpStr;
+			
+			tmpStr = Manager.CONF_MAP.get( "gw.receiver.topic" );
+			if ( tmpStr == null )
+				return result;
+			this.topic = tmpStr;
+			
+			
+			/**
+			 * Message-Q limit retry interval ms
+			 */
+			tmpStr = Manager.CONF_MAP.get( "mq.generator.limit.retry.interval.ms" );
+			tmpInt = ( tmpStr != null ) ? Integer.parseInt( tmpStr ) : 500;
+			if ( tmpInt < 0 )
+				return result; 
+			this.mqRetryIntervalMs = tmpInt;
+			
+
+			result = true;
+			return result;
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+			return false;
+		}
+		finally
+		{
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][Setting config data to memory. ] - %3$s", 
+					this.procname, 
+					( result ? "RUNNING" : "ERROR" ),
+					( result ? "SUCCESS" : "FAIL" ) ), 
+					LoggerElements.LOG_LEVEL1 );
+		}
+	}
+}

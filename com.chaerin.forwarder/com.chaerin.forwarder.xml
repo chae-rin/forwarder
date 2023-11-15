@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<project name="com.chaerin.forwarder" default="prepare">
+
+    <!-- ==================================== -->
+    <!--Property define-->
+    <!-- ==================================== -->
+    <tstamp>
+        <format property="DSTAMP" pattern="yyyyMMdd"/>
+        <format property="TSTAMP" pattern="HHmmss"/>
+    </tstamp>
+    
+    <property name="base.dir"	value="./"/>
+    <property name="lib.dir" 	value="lib"/>
+    <property name="dist.dir" 	value="dist"/>
+    <property name="build.dir" 	value="bin"/>
+    <property name="src.dir" 	value="src"/>
+    <property name="jar.file" 	value="com.chaerin.forwarder.jar"/>
+	
+	
+	
+	<!-- ==================================== -->
+	<!-- Define Libray path..............-->
+	<!-- ==================================== -->
+		
+	
+	
+	<echo message="Initializing paths :  started at : ${DSTAMP}-${TSTAMP}"/>
+    <!-- ==================================== -->
+    <!-- Check environments..............-->
+    <!-- ==================================== -->
+	<target name="check.env">
+	    <available property="no.dist.dir"	file="${dist.dir}"	type="dir"/>
+		<available property="no.lib.dir" 	file="${lib.dir}" 	type="dir"/>
+	</target>
+	
+	<target name="create.dist.dir" unless="no.dist.dir">
+	    <echo message=" Create dist directory"/>
+	    <mkdir dir="${dist.dir}"/>
+	</target>
+	
+	<target name="create.lib.dir" unless="no.lib.dir">
+		<echo message=" Create lib directory"/>
+		<mkdir dir="${lib.dir}"/>
+	</target>
+	
+	
+	
+	<!-- ==================================== -->
+    <!-- Propared-->
+	<!-- ==================================== -->
+    <target name="prepare" depends="check.env">
+        <echo message="Build started at : ${DSTAMP}-${TSTAMP}"/>
+		<antcall target="create.dist.dir"></antcall>
+		<antcall target="create.lib.dir"></antcall>
+    </target>
+    
+	
+    
+	<!-- ==================================== -->
+    <!-- Clear - Delete Dir-->
+	<!-- ==================================== -->
+    <target name="clean">
+        <delete>
+            <fileset dir="${dist.dir}">
+            	<include name="*"/>
+            </fileset>
+        </delete>
+        <echo message="Deleted files - ${dist.dir}/all folder and files"/>
+    </target>
+    
+    
+    
+	<!-- ==================================== -->
+    <!-- Compile -->
+	<!-- ==================================== -->
+    <target name="compile">
+        <mkdir dir="${build.dir}"/>
+        <javac deprecation="off" srcdir="${src.dir}" destdir="${build.dir}" listfiles="no" failonerror="true"></javac>
+    	<echo message="Compiled source files"/>
+    </target>
+    
+	
+    
+	<!-- ==================================== -->
+    <!-- Make Jar File -->
+	<!-- ==================================== -->
+    <target name="mkjar">     
+        <mkdir dir="${dist.dir}"/>
+        <manifest file="CHAERIN.FORWARDER.MF">
+            <attribute name="Built-By" 		value="chaerin, Yoo"/>
+            <attribute name="Main-Class" 	value="com.chaerin.forwarder.BootStrap"/>
+        	<attribute name="Class-Path" 	value=""/>
+        </manifest>
+        <jar
+            destfile="${dist.dir}/${jar.file}" basedir="${build.dir}"
+            manifest="CHAERIN.FORWARDER.MF"
+        />
+    </target>
+    
+    
+    
+	<!-- ==================================== -->
+    <!-- Dist -->
+	<!-- ==================================== -->
+	<target name="dist">
+		<!-- copy properties file to base dir -->
+        <copy todir="${dist.dir}/">
+            <fileset file="${base.dir}/*.properties"/>
+        </copy>
+    </target>
+	
+</project>

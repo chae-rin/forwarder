@@ -1,0 +1,172 @@
+package com.illootech.forwarder;
+
+import com.acidhan.frameworks.file.FileIOHandler;
+import com.acidhan.frameworks.file.config.ConfigLoader;
+import com.acidhan.frameworks.file.log.Logger;
+import com.acidhan.frameworks.file.log.LoggerElements;
+import com.illootech.forwarder.manager.Manager;
+
+public class BootStrap {
+	public static String DEFAULT_CONFIG_FILE = null;
+	public static String REMOTE_DB_CONFIG_FILE = null;
+
+	public static final String DEFAULT_IP_REG_FILE = "./ip.registry";
+
+
+	private Manager manager = null;
+
+
+	public static String PROC_ID = null; 
+
+
+
+
+
+
+	/**
+	 *	manager �ㅽ뻾
+	 *	
+	 * @ param 
+	 * @ return boolean()
+	 * @ exception Exception e
+	 */
+	private boolean initService()
+	{
+		boolean result = false;
+
+		try
+		{
+			this.loadProperties();
+
+			Logger.sysInfo("###############################################################################################", LoggerElements.LOG_LEVEL0);
+			Logger.sysInfo("#\t\tData Preparation Interface ( www.illootech.com ) Start-Up", LoggerElements.LOG_LEVEL0);
+			Logger.sysInfo("#\t\tInitializing & Startup for Customer's Location Info. Ver. 4.0.0", LoggerElements.LOG_LEVEL0);
+			Logger.sysInfo("#\t\tupdated : 2018.06", LoggerElements.LOG_LEVEL0 );
+			Logger.sysInfo("###############################################################################################", LoggerElements.LOG_LEVEL0);
+
+
+			if( this.manager == null )
+				this.manager = new Manager();
+
+			this.manager.startup( "MANAGER" );
+			result = true;
+
+			return result;
+		}
+		catch (Exception e)
+		{
+			e.printStackTrace();
+			return false;
+		}
+	}
+
+
+
+
+	/**
+	 *	properties �뚯씪�먯꽌 濡쒓렇 �꾩튂, 濡쒓렇紐��ㅼ젙
+	 *	濡쒓렇 �뚯씪 �앹꽦
+	 *	
+	 * @ param 
+	 * @ return boolean()
+	 * @ exception Exception e
+	 */
+	private boolean loadProperties()
+	{
+		boolean result = false;
+		ConfigLoader config = null;
+		FileIOHandler fhandler = null;
+
+		try
+		{
+			String tmpStr = null;
+
+			fhandler = new FileIOHandler();
+			config = new ConfigLoader( BootStrap.DEFAULT_CONFIG_FILE );
+
+
+
+
+			/**
+			 * **********************************************
+			 * loading config - system log file 
+			 * **********************************************
+			 */
+
+			tmpStr = config.getStringTag( "system.log.path" );
+			if (tmpStr != null)
+				LoggerElements.defaultSystemLogPath = tmpStr;
+
+			tmpStr = config.getStringTag( "system.log.file.prefix" );
+			if (tmpStr != null)
+			{
+				if ( !tmpStr.endsWith( "_" ) )
+					tmpStr += "_";
+
+				LoggerElements.defaultSystemLogFilePrefix = tmpStr;
+			}
+
+			LoggerElements.defaultSystemLogFileName = fhandler.makeFilename(
+					LoggerElements.defaultSystemLogPath,
+					LoggerElements.defaultSystemLogFilePrefix);
+
+			result = true;
+			return result;
+		}
+		catch (Exception e)
+		{
+			Logger.error( e );
+			System.exit( 1 );
+			return false;
+		}
+		finally
+		{
+			fhandler = null;
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][loading properties to memory] - %3$s", 
+					"BOOT.STRAP", 
+					(result ? "RUNNING" : "ERROR"),
+					(result ? "SUCCESS" : "FAIL")), 
+					LoggerElements.LOG_LEVEL1);
+		}
+	}
+
+
+
+	/**
+	 *	硫붿씤 硫붿냼��
+	 *	
+	 * @ param 
+	 * 		String[] args : 
+	 * 			[0]  :  �ㅼ젙�뚯씪 寃쎈줈
+	 * 			[1]  :  �ㅼ�以껱D
+	 * @ return void
+	 * @ exception Exception e
+	 */
+	public static void main(String[] args)
+	{
+		BootStrap bs = null;
+
+		try
+		{
+			bs = new BootStrap();
+			BootStrap.DEFAULT_CONFIG_FILE = args[0];
+
+			if( BootStrap.DEFAULT_CONFIG_FILE == null || BootStrap.DEFAULT_CONFIG_FILE.trim().equals("") ) {
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][DEFAULT_CONFIG_FILE is null. shutdown....] - %3$s", 
+						"BOOT.STRAP", 
+						"ERROR",
+						"FAIL"), 
+						LoggerElements.LOG_LEVEL1);
+			}
+			bs.initService();
+			return;
+		}
+		catch (Exception e)
+		{
+			e.printStackTrace();
+			return;
+		}
+	}
+}

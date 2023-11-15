@@ -1,0 +1,449 @@
+package com.illootech.forwarder.common.repository;
+
+public class BusinessQuery {
+	
+	public static final String SELECT_RULE_FUNC = "SELECT A.id AS RULE_ID , A.type AS RULE_TYPE , A.importance AS RULE_IMPORTANCE , C.func_id AS FUNC_ID , B.func_id AS FUNC_SUB_ID , C.arg_value  AS ARG_VALUE , C.func_memo  AS FUNC_MEMO , D.query_id AS QUERY_ID , E.query AS QUERY , E.bind_args AS BIND_ARGS "+
+		"FROM "+
+		"( "+
+		"	SELECT id , type , importance "+
+		"	FROM TBL_RSYS_RULE  "+
+		"	WHERE useyn ='Y'  "+
+		") A  "+
+		"LEFT OUTER JOIN TBL_RSYS_RULE_FUNC_DTL B ON ( A.id = B.rule_id )  "+
+		"LEFT OUTER JOIN TBL_RSYS_FUNC_ARGS C ON ( B.func_id = C.id )  "+
+		"LEFT OUTER JOIN TBL_RSYS_FUNC D ON ( C.func_id = D.id )  "+
+		"LEFT OUTER JOIN TBL_RSYS_REG_SQL E ON ( D.query_id = E.query_id ) ";
+	
+	public static final String SELECT_RULE_FUNC_RELOAD = "SELECT A.id AS RULE_ID , A.type AS RULE_TYPE , A.importance AS RULE_IMPORTANCE , C.func_id AS FUNC_ID , B.func_id AS FUNC_SUB_ID , C.arg_value  AS ARG_VALUE , C.func_memo  AS FUNC_MEMO , D.query_id AS QUERY_ID , E.query AS QUERY , E.bind_args AS BIND_ARGS "+
+			"FROM "+
+			"( "+
+			"	SELECT id , type , importance "+
+			"	FROM TBL_RSYS_RULE  "+
+			"	WHERE deploy_yn = 'Y' and useyn ='Y'"+
+			") A  "+
+			"LEFT OUTER JOIN TBL_RSYS_RULE_FUNC_DTL B ON ( A.id = B.rule_id )  "+
+			"LEFT OUTER JOIN TBL_RSYS_FUNC_ARGS C ON ( B.func_id = C.id )  "+
+			"LEFT OUTER JOIN TBL_RSYS_FUNC D ON ( C.func_id = D.id )  "+
+			"LEFT OUTER JOIN TBL_RSYS_REG_SQL E ON ( D.query_id = E.query_id ) ";
+	
+	
+	public static final String SELECT_WCFFD402TH = "SELECT NVL(MAX(1),0) AS CNT " + 
+		 "FROM DUAL " + 
+		 "WHERE EXISTS " + 
+		 "( " + 
+		 	"SELECT /*+INDEX(WCFFD402TH WCFFD402TH_PK1)*/ " + 
+		 	"       1 " + 
+		 	"  FROM WCFFD402TH " + 
+		 	" WHERE XCP_PLCY_DSCD >= '0' " + 
+		 	"   AND XCP_PLCY_TGT_TPCD	= ? " + 
+		 	"   AND XCP_PLCY_TGT_ID		= ? " + 
+		 	"   AND APLY_STA_DH <= TO_CHAR(SYSDATE,'YYYYMMDDHH24MISS') " + 
+			"   AND APLY_END_DH >= TO_CHAR(SYSDATE,'YYYYMMDDHH24MISS') " + 
+		 ")";
+
+	
+	
+	public static final String INSERT_WCFFD114TH = "INSERT INTO WCFFD114TH " + 
+			"( "+
+			"  LOG_COL_DY "+
+			", LOG_COL_TM "+
+			", CD_UNQ_ID "+
+			", LOG_RNDM_KEY "+
+			", SEX_DIS "+
+			", AGE "+
+			", TRN_AM "+
+			", SVC_CD "+
+			", SHOPM_CD "+
+			", FATR_3_CRT_APYN "+
+			", MCH_NO "+
+			", PRD_NM "+
+			", TRN_YN "+
+			", TRN_DY "+
+			", TRN_TM "+
+			", CD_NO "+
+			", CRT_SUC_YN "+
+			", RPS_IP "+
+			", RPS_IP_NAT_CD "+
+			", RPS_UUID "+
+			", ERR_CD "+
+			", JUD_NO "+
+			", JUD_RST_CD "+
+			", JUD_RSN_CD "+
+			", RPS_SRCH_RULE_ID "+
+			", SRCH_RULE_LIST "+
+			", RPS_XCP_RULE_ID "+
+			", XCP_RULE_LIST "+
+			", XCP_TGT_TPCD "+
+			", CHNL_DSCD "+
+			", NAT_IP "+
+			", NAT_IP_ACQR_ERR_CD "+
+			", IP_NAT_CD "+
+			", ETHN_0_IP "+
+			", ETHN_0_MAC "+
+			", PROXY_USE_YN "+
+			", PROXY_IP "+
+			", PROXY_SVR_IP "+
+			", PROXY_NAT_CD "+
+			", VPN_USE_YN "+
+			", VPN_IP "+
+			", VPN_CLNT_IP "+
+			", VPN_NAT_CD "+
+			", OS_LANG_CD "+
+			", DISK_MDL "+
+			", DISK_SER "+
+			", USB_SER_1 "+
+			", USB_NPKI_INCL_1 "+
+			", HACK_BLOC_STS "+
+			", KEYB_SCRT_STS "+
+			", WIN_FW_STCD "+
+			", WIN_RTM_ALW_YN "+
+			", WIN_RTM_IP "+
+			", HP_DIS "+
+			", UUID "+
+			", UUID_2 "+
+			", PBUSE_OS_VER "+
+			", ANDR_MCN_MFCO "+
+			", ANDR_TRM_ID "+
+			", ANDR_TRM_TEL_NO "+
+			", ANDR_NTWK_NAT_CD "+
+			", ANDR_SIM_NAT_CD "+
+			", ANDR_NTWK_BIZPE_CD "+
+			", ANDR_SIM_BIZPE_NM "+
+			", ANDR_TRM_KD "+
+			", ANDR_ENTPE_ID "+
+			", PBUSE_NTWK_INF "+
+			", PBUSE_TRM_MAC_INF "+
+			", PBUSE_LOOTING_YN "+
+			", PBUSE_APP_EXE_YN "+
+			", BPSS_YN "+
+			", WEB_IP "+
+			", WEB_IP_NAT_CD_2 "+
+			", USE_MAC "+
+			", ETHN_0_GTW_IP "+
+			", ETHN_0_GTW_MAC "+
+			", ETHN_0_DHCP_IP "+
+			", CPU_ID_1 "+
+			", IMEI_NO "+
+			", IMSI_NO "+
+			", TRM_MDL_NM "+
+			", BRWS_USER_LANG "+
+			", BRWS_LANG "+
+			", BRWS_SYS_LANG "+
+			", SYS_LANG "+
+			", SYS_GMT "+
+			", PSN_KEY "+
+			", PSN_VRF_KEY "+
+			", CVS_VAL "+
+			", PSN_KEY_XST_YN "+
+			", DTC_TPCD "+
+			", DTC_PRN_ID "+
+			", DTC_APP_NM "+
+			", DTC_APP_ID "+
+			", DTC_DTL_TPCD "+
+			", DTC_CN "+
+			", CD_BRN_CD "+
+			", CD_HLDPE_DIS_CD "+
+			", CD_ISU_DY "+
+			", CD_PAS_NXTNM "+
+			", CD_TPCD "+
+			", CD_RK_DSCD "+
+			", CD_PRD_CD "+
+			", CD_ISUCO_RSN_CD "+
+			", CD_FMLY_REL_CD "+
+			", MBR_NO "+
+			", MBR_CD_ISUPE_CUS_NO "+
+			", MBR_CD_HLDPE_CUS_NO "+
+			", MBR_CD_HLDPE_SEX "+
+			", MBR_CD_HLDPE_AGE "+
+			", MBR_PSN_CO_DSCD "+
+			", MBR_FRNPE_DSCD "+
+			", MBR_BZNO "+
+			", MBR_CORPNO "+
+			", MCH_BZNO "+
+			", MCH_NM "+
+			", RDY_ITM "+
+			", RGS_DH "+
+			", DL_SCORE "+
+			", DL_CUF_SCR "+
+			", DL_SCORE_RSN "+
+			", DL_MDL_SVC_ID "+
+			", DL_MDL_ID "+
+			", DL_MDL_RULE_ID "+
+			", DL_ELAP_MS "+
+			", OS_INF "+
+			", BRWS_INF "+
+			", BRWS_APP_NM "+
+			", BRWS_APP_CODE_NM "+
+			", BRWS_VER "+
+			", ANDR_ID "+
+			", WDVN_ID "+
+			") VALUES ( "+
+			"  ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", CASE WHEN INSTRB(?, '|') > 0 THEN SUBSTRB(?, 1, INSTRB(?, '|')-1) ELSE ? END "+
+			", CASE WHEN INSTRB(?, '|') > 0 THEN SUBSTRB(?, 1, INSTRB(?, '|')-1) ELSE ? END "+
+			", CASE WHEN INSTRB(?, '|') > 0 THEN SUBSTRB(?, 1, INSTRB(?, '|')-1) ELSE ? END "+
+			", CASE WHEN INSTRB(?, '|') > 0 THEN SUBSTRB(?, 1, INSTRB(?, '|')-1) ELSE ? END "+
+			", CASE WHEN INSTRB(?, '|') > 0 THEN SUBSTRB(?, 1, INSTRB(?, '|')-1) ELSE ? END "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", SUBSTR(?,1,1) "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", TO_CHAR(SYSDATE,'YYYYMMDDHH24MISS') "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+		")" ;
+	
+	
+	public static final String INSERT_WCFFD114TF = "INSERT INTO WCFFD114TF "+
+	"( "+
+			"  LOG_COL_DT "+
+			", LOG_COL_TM "+
+			", LOG_RNDM_KEY_NO "+
+			", DTC_TPCD "+
+			", DTC_PRN_ID "+
+			", DTC_APP_NM "+
+			", DTC_APP_ID "+
+			", DTC_DTL_TPCD "+
+			", DTC_CN "+
+			", RGS_DH "+
+			") VALUES ( "+
+			"  ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", ? "+
+			", TO_CHAR(SYSDATE,'YYYYMMDDHH24MISS') "+
+			") ";
+	
+	public static final String INSERT_WCFFD122TH = "INSERT INTO WCFFD122TH "+
+		"( "+
+		"  TRN_DY "+
+		", TRN_TM "+
+		", JUD_NO "+
+		", SRCH_RULE_ID "+
+		", BLOC_LIST_TGT_TP "+
+		", TGT_VAL "+
+		", APL_CD "+
+		", SYS_CD "+
+		", JUD_RST_CD "+
+		", INSP_CHRPE_EMP_NO "+
+		", INSP_DH "+
+		", ALT_TGT_TP "+
+		", DL_SCORE "+
+		", DL_CUF_SCR "+
+		", DL_SCORE_RSN			 "+
+		", DL_MDL_SVC_ID			 "+
+		", DL_MDL_ID				 "+
+		", DL_MDL_RULE_ID	     "+				
+		") "+
+		" VALUES  "+
+		"( "+
+		"  ? "+
+		", ? "+
+		", ? "+
+		", ? "+
+        ", ? "+
+        ", ? "+
+		", ? "+
+		", ? "+
+		", ? "+
+		", 'ILLOOTECH' "+
+		", TO_CHAR(SYSDATE, 'YYYYMMDDHH24MISS') "+
+		", ? "+
+		", ? "+
+		", ? "+
+		", ? "+
+		", ? "+
+		", ? "+
+		", ? "+
+		") ";
+	
+	
+	public static String INSERT_WCFFD120TH = "INSERT INTO WCFFD120TH "+
+		"( "+
+		"  CHSE_NO "+
+		", BLOC_LIST_TP "+
+		", BLOC_LIST_TGT_TP "+
+		", TGT_VAL "+
+		", DST_DSCD "+
+		", APL_CD "+
+		", TMS_DH "+
+		", STCD "+
+		", ERR_CD "+
+		", APLY_STA_DH "+
+		", APLY_END_DH "+
+		") VALUES "+
+		"( "+
+		"  ? "+
+		", ? "+
+		", ? "+
+		", ? "+
+		", ? "+
+		", ? "+
+		", NULL "+
+		", '1' "+
+		", NULL "+
+		", ? "+
+		", ? "+
+		") ";
+	
+	public static String INSERT_WCFFD405TH = "INSERT INTO WCFFD405TH "+
+		"( "+
+		"   BLOC_LIST_TP "+
+		"	,BLOC_LIST_TGT_TP "+
+		"	,TGT_VAL "+
+		"	,APL_YN "+
+		"	,COL_CHNL_NM "+
+		"	,DB_RGS_DH "+
+		"	,DB_RGS_PRN_NO "+
+		"	,DB_CHG_TS "+
+		"	,DB_CHG_PRN_NO "+
+		") VALUES "+
+		"( "+
+		"	  ? "+
+		"	, ? "+
+		"	, ? "+
+		"	, ? "+
+		"	, ? "+
+		"	, TO_CHAR(SYSDATE, 'yyyymmddhh24miss') "+
+		"	, 'ILLOOTECH' "+
+		"	, TO_CHAR(SYSDATE, 'yyyymmddhh24miss') "+
+		"	, 'ILLOOTECH' "+
+		") ";
+	
+	public static String SELECT_WCFFD403TH = "SELECT NVL(MAX(1),0) AS CNT "+
+		"FROM DUAL "+
+		"WHERE EXISTS ( "+
+		"	 			SELECT /*+INDEX(WCFFD403TH WCFFD403TH_PK1)*/ "+
+		"	 					1 "+
+		"	 			  FROM WCFFD403TH "+
+		"	 			 WHERE BLOC_LIST_TP = ? "+
+		"	 			   AND BLOC_LIST_TGT_TP = ? "+
+		"	 			   AND TGT_VAL = ? "+
+		"	 			   AND APLY_YN = 'Y' "+
+		"	 		  )";
+
+}

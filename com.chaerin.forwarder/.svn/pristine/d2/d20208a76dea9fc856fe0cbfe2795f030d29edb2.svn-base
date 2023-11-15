@@ -1,0 +1,13 @@
+package com.illootech.forwarder.common;
+
+import com.acidhan.frameworks.collection.messageq.linear.RCMessageQueue;
+
+public class MessageQueue extends RCMessageQueue
+{
+	/**
+	 * **************************************************************
+	 * TODO
+	 * RCMessageQueue 
+	 * **************************************************************
+	 */
+}

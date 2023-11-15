@@ -1,0 +1,53 @@
+package com.illootech.forwarder.common;
+
+import java.util.LinkedHashMap;
+
+public class ruleInformation {
+	
+	private String RULE_ID = "";
+	private String RULE_TYPE = "";
+	private int RULE_IMPORTANCE = -1;
+	private LinkedHashMap<String, ruleMethodInformation> FUNC_LIST = null;
+	
+	public ruleInformation( String RULE_ID , String RULE_TYPE , String RULE_IMPORTANCE )
+	{
+		this.RULE_ID = RULE_ID;
+		this.RULE_TYPE = RULE_TYPE;
+		this.RULE_IMPORTANCE = !RULE_IMPORTANCE.equals("") ? Integer.parseInt( RULE_IMPORTANCE ) : -1 ;
+		this.FUNC_LIST = new LinkedHashMap<String, ruleMethodInformation>();
+	}
+	
+	public String getRULE_ID() {
+		return this.RULE_ID;
+	}
+
+	public void setRULE_ID(String rULE_ID) {
+		this.RULE_ID = rULE_ID;
+	}
+
+	public String getRULE_TYPE() {
+		return this.RULE_TYPE;
+	}
+
+	public void setRULE_TYPE(String rULE_TYPE) {
+		this.RULE_TYPE = rULE_TYPE;
+	}
+
+	public int getRULE_IMPORTANCE() {
+		return this.RULE_IMPORTANCE;
+	}
+
+	public void setRULE_IMPORTANCE(String rULE_IMPORTANCE) {
+		this.RULE_IMPORTANCE = !rULE_IMPORTANCE.equals("") ? Integer.parseInt( rULE_IMPORTANCE ) : -1 ;
+	}
+
+	public LinkedHashMap<String, ruleMethodInformation> getFUNC_LIST() {
+		return FUNC_LIST;
+	}
+
+	public void setFUNC_LIST(LinkedHashMap<String, ruleMethodInformation> fUNC_LIST) {
+		FUNC_LIST = fUNC_LIST;
+	}
+
+	
+}

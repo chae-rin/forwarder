@@ -1,0 +1,92 @@
+package com.illootech.forwarder.common;
+
+public class ruleMethodInformation {
+	
+	private String FUNC_ID = "";
+	private String FUNC_SUB_ID = "";
+	private String ARG_VALUE = "";
+	private String FUNC_MEMO = "";
+	private String QUERY_ID = "";
+	private String QUERY = "";
+	private String BIND_ARGS = "";
+	
+	
+	public ruleMethodInformation( String FUNC_ID , String FUNC_SUB_ID )
+	{
+		this.FUNC_ID = FUNC_ID;
+		this.FUNC_SUB_ID = FUNC_SUB_ID;
+		
+	}
+
+
+	public String getFUNC_ID() {
+		return FUNC_ID;
+	}
+
+
+	public void setFUNC_ID(String fUNC_ID) {
+		FUNC_ID = fUNC_ID;
+	}
+
+
+	public String getFUNC_SUB_ID() {
+		return FUNC_SUB_ID;
+	}
+
+
+	public void setFUNC_SUB_ID(String fUNC_SUB_ID) {
+		FUNC_SUB_ID = fUNC_SUB_ID;
+	}
+
+
+	public String getARG_VALUE() {
+		return ARG_VALUE;
+	}
+
+
+	public void setARG_VALUE(String aRG_VALUE) {
+		ARG_VALUE = aRG_VALUE;
+	}
+
+
+	public String getFUNC_MEMO() {
+		return FUNC_MEMO;
+	}
+
+
+	public void setFUNC_MEMO(String fUNC_MEMO) {
+		FUNC_MEMO = fUNC_MEMO;
+	}
+
+
+	public String getQUERY_ID() {
+		return QUERY_ID;
+	}
+
+
+	public void setQUERY_ID(String qUERY_ID) {
+		QUERY_ID = qUERY_ID;
+	}
+
+
+	public String getQUERY() {
+		return QUERY;
+	}
+
+
+	public void setQUERY(String qUERY) {
+		QUERY = qUERY;
+	}
+
+
+	public String getBIND_ARGS() {
+		return BIND_ARGS;
+	}
+
+
+	public void setBIND_ARGS(String bIND_ARGS) {
+		BIND_ARGS = bIND_ARGS;
+	}
+	
+	
+}

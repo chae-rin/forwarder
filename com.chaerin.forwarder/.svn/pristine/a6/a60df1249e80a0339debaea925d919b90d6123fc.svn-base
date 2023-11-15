@@ -1,0 +1,13 @@
+Manifest-Version: 1.0
+Ant-Version: Apache Ant 1.10.12
+Created-By: 17.0.1+12 (Eclipse Adoptium)
+Built-By: hanGyu, Lee
+Main-Class: com.illootech.forwarder.BootStrap
+Class-Path: /app/ursa/common.lib/com.acidhan.protocol.adapter.jar /app
+ /ursa/common.lib/com.acidhan.framework.v4_3.jar /app/ursa/common.lib/
+ kafka-clients-3.0.0.jar /app/ursa/common.lib/kafka-log4j-appender-3.0
+ .0.jar /app/ursa/common.lib/com.illootech.util.jar /app/ursa/common.l
+ ib/slf4j-api-1.7.25.jar /app/ursa/common.lib/log4j-core-2.17.0.jar /a
+ pp/ursa/common.lib/log4j-api-2.17.0.jar /app/ursa/common.lib/log4j-sl
+ f4j-impl-2.17.0.jar
+

@@ -1,0 +1,20 @@
+#------------------------------------------------------------------
+# Common configuration
+
+system.ip = 10.212.98.145
+system.log.path = ./
+system.log.file.prefix = FWD
+
+
+
+#------------------------------------------------------------------
+# Load Config configuration
+		
+conf.id = CONF.0033
+conf.db.type = MARIADB
+conf.db.ip = 10.190.177.21
+conf.db.port = 53307
+conf.db.name = illootech
+conf.db.user = illadm
+conf.db.passwd = illootechrnd1!
+	

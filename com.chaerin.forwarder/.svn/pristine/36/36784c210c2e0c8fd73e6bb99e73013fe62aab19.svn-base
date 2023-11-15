@@ -1,0 +1,2192 @@
+package com.illootech.forwarder.generator;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.LinkedList;
+import java.util.List;
+
+import javax.print.DocFlavor.STRING;
+
+import com.acidhan.frameworks.collection.messageq.linear.IF_MessageDataSet;
+import com.acidhan.frameworks.databases.rdbms.mariadb.handler.MariaDBHandler;
+import com.acidhan.frameworks.databases.rdbms.oracle.handler.OracleDBHandler;
+import com.acidhan.frameworks.file.log.Logger;
+import com.acidhan.frameworks.file.log.LoggerElements;
+import com.acidhan.frameworks.thread.RCThread;
+import com.acidhan.frameworks.utils.reflect.DynamicClassLoader;
+import com.acidhan.protocol.stack.common.IF_PROTOCOL;
+import com.illootech.forwarder.common.ruleInformation;
+import com.illootech.forwarder.common.ruleMethodInformation;
+import com.illootech.forwarder.common.repository.BusinessQuery;
+import com.illootech.forwarder.common.ruleMethod.InsertBL;
+import com.illootech.forwarder.common.ruleMethod.InsertBLX;
+import com.illootech.forwarder.manager.Manager;
+
+public class Generator extends RCThread{
+	/**
+	 * Thread delay & Process name
+	 */
+	private long threadDelay	= 1;
+	private String procname 	= null;
+
+	/**
+	 * Inbound telegram info
+	 */
+	private IF_PROTOCOL inboundTelegram			= null;
+	private DynamicClassLoader classLoader 		= null;
+	private String protocolJarFileName 			= null;
+	private String inboundProtocolClassname 	= null;
+	private String inboundProtocolVersion 		= null;
+	private String inboundProtocolName 			= null;
+	private String[][] inboundTelegramFormat 	= null;
+
+	/**
+	 * MariaDB connection
+	 */
+	private MariaDBHandler mariaDbHandler 	= null;
+	private Connection mariaConn 				= null;
+	private PreparedStatement[] mariaPsmtArr		= null;
+	private long dbSessionCheckIntervalMs 	= 5000;		
+	private long dbSessionCheckCount 		= 0;		
+
+
+	/**
+	 * oracle connection
+	 */
+	private OracleDBHandler oracleDbHandler 	= null;
+	private Connection oracleConn 				= null;
+	private PreparedStatement[] oraclePsmtArr		= null;
+
+
+	/**
+	 * oracle connection
+	 */
+	private String ORACLE_IP = "";
+	private String ORACLE_USER = "";
+	private String ORACLE_PW = "";
+	private String ORACLE_DB_NAME = "";
+	private String ORACLE_TYPE = "";
+	private String ORACLE_PORT = "";
+
+
+	private final int DL_EFDS_DFLT_CUT_OFF_SCR = 1001;
+
+	private String BL_FUNC_ID_LIST = "";
+	private String BLX_FUNC_ID_LIST = "";
+	private String PLCY_FUNC_ID_LIST = "";
+
+	public Generator( int id, String name )
+	{
+		this.procname = name;
+		this.classLoader = new DynamicClassLoader();
+	}
+
+
+	public void run()
+	{
+		try
+		{
+			if ( !this.settingConfig() )
+				return;
+
+			if ( !this.initTelegram() )
+				return;
+
+			//			if ( !this.initMariaDBConn() )
+			//				return;
+			//
+			//			if ( !this.initMariaSql() )
+			//				return;
+
+			if ( !this.initOracleDBConn() )
+				return;
+
+			if ( !this.initOracleSql() )
+				return;
+
+
+			while ( this.getLoopAllowFlag() )
+			{
+				try
+				{
+					if ( !this.DBSessionCheck() )
+					{
+						//						this.releaseMariaSql();
+						//						this.releaseMariaDBConn();
+						this.releaseOracleSql();
+						this.releaseOracleDBConn();
+
+						//						if ( !this.initMariaDBConn() )
+						//							return;
+						//
+						//						if ( !this.initMariaSql() )
+						//							return;
+
+						if ( !this.initOracleDBConn() )
+							return;
+
+						if ( !this.initOracleSql() )
+							return;
+					}
+
+					this.processing();
+				}
+				catch ( Exception e )
+				{
+					Logger.error( e );
+					continue;
+				}
+				finally
+				{
+					this.delay( this.threadDelay );
+				}
+			}
+
+			return;
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+			return;
+		}
+		finally
+		{
+			this.releaseTelegram();
+			//			this.releaseMariaSql();
+			//			this.releaseMariaDBConn();
+			this.releaseOracleSql();
+			this.releaseOracleDBConn();
+			this.shutdown();
+		}
+	}
+
+
+	private boolean processing()
+	{
+		boolean result = false;
+
+		IF_MessageDataSet telegramDataSet 				= null;
+		LinkedHashMap<String, byte[]> parsedTelegram 	= null;
+
+		String[] DETECT_RID_LISTS_tmp = null; 	// 탐지된 전체 룰 목록 임시
+		String[] DETECT_RID_LISTS = null; 		// 탐지된 전체 룰 목록
+
+
+		try
+		{
+			/**
+			 * Validation
+			 */
+			/* Telegram */
+			if ( Manager.mqGenerator == null )
+				return result;
+
+			telegramDataSet = Manager.mqGenerator.poll();
+			if ( telegramDataSet == null )
+				return result;
+
+			parsedTelegram = this.parsingTelegram( telegramDataSet );
+			if ( parsedTelegram == null )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][Processing. Parsed telegram is null. ] - FAIL", 
+						this.procname,
+						"ERROR" ), 
+						LoggerElements.LOG_LEVEL1 );
+				return result;
+			}
+
+
+			// DL Cut-off 점수 이상의 DL SCORE 일떼 ALERT 
+			int DL_SCORE = parsedTelegram.get("DL_SCORE") != null && !new String( parsedTelegram.get("DL_SCORE") ).equals("")? Integer.parseInt( new String( parsedTelegram.get("DL_SCORE") ) ) : 0;
+
+			if( DL_SCORE > this.DL_EFDS_DFLT_CUT_OFF_SCR )
+			{
+				if( !this.insertOnlAlert( parsedTelegram ,"" ,"" ,"" ,"S"  ) )
+					return result;
+			}
+
+
+			// 룰 캐치 여부 판단
+			String DETECT_RID_LIST = ( parsedTelegram.get( "DETECT_RID_LIST" ) != null ? new String( parsedTelegram.get( "DETECT_RID_LIST" ) ) 	: "" );	
+
+			if( !DETECT_RID_LIST.equals("") )
+			{
+				DETECT_RID_LISTS_tmp = DETECT_RID_LIST.split("R");
+
+				if( DETECT_RID_LISTS_tmp.length < 2 )
+				{
+					Logger.sysInfo(String.format(
+							"[%1$-20s][%2$-10s][Processing. DETECT_RID_LISTS is wrong data ] - FAIL", 
+							this.procname,
+							"ERROR" ), 
+							LoggerElements.LOG_LEVEL1 );
+					return result;
+				}
+
+				// 탐지 룰 전체 정보 배열 저장
+				DETECT_RID_LISTS = new String[ DETECT_RID_LISTS_tmp.length -1 ];
+
+				for(int i = 1 ; i < DETECT_RID_LISTS_tmp.length ; i++ )
+				{
+
+					String DETCH_RULE =  "R" + DETECT_RID_LISTS_tmp[i];
+					DETECT_RID_LISTS[i-1] = DETCH_RULE;
+
+				}
+
+
+			}
+
+			
+			// 판정 결과 코드 셋팅
+			
+			if( !this.getJUDValue( parsedTelegram , DETECT_RID_LISTS) )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][Processing. getJUD Value setting FAIL. ] - SUCCESS", 
+						this.procname,
+						"RUNNING" ), 
+						LoggerElements.LOG_LEVEL2 );	
+				return result;
+			}
+
+
+			// 온라인 인증 내역 insert 
+			if( !this.insertWCFFD114TH(parsedTelegram) )
+				return result;
+
+			// 온라인인증판정악성앱상세내역 insert
+			if( !this.insertWCFFD114TF(parsedTelegram) ) 
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][processing. insertWCFFD114TF fail ] - %3$s", 
+						this.procname,
+						"ERROR",
+						"FAIL"), 
+						LoggerElements.LOG_LEVEL1 );
+				
+//				return result;
+
+			}
+
+
+			if( DETECT_RID_LISTS == null
+					|| DETECT_RID_LISTS.length == 0 )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][Processing. NO DETCHED RULE ] - %3$s", 
+						this.procname,
+						"RUNNING",
+						"SUCCESS" ), 
+						LoggerElements.LOG_LEVEL1 );
+
+				result = true;
+				return result;
+			}
+
+			
+			// 룰별 집계 함수 실행 부분
+			for( String RULE_ID : DETECT_RID_LISTS )
+			{
+
+				// 해당룰 전문에 임시 셋팅 ( 집계 함수 쿼리문에 사용하기 떄문 )
+				parsedTelegram.put( "JUD_RULE", RULE_ID.replace(".", "").getBytes() );
+				
+				
+				// 해당룰 정보가 있는지 확인 ( 집계 함수 정보 등등 )
+				if( Manager.ruleInfo.get(RULE_ID) == null )
+				{
+					Logger.sysInfo(String.format(
+							"[%1$-20s][%2$-10s][Processing. Rule Info is null ] - %4$s", 
+							this.procname,
+							"ERROR",
+							"FAIL" ), 
+							LoggerElements.LOG_LEVEL1 );
+
+					return false;
+				}
+
+
+				ruleInformation ruleInfo = Manager.ruleInfo.get( RULE_ID );
+				
+				
+				// 집계함수 실핼 부분
+				if( !this.actionRuleMethod( parsedTelegram , ruleInfo , RULE_ID ) )
+					return false;
+
+			}
+
+
+			result = true;
+			return result;
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+			return false;
+		}
+	}
+
+
+
+
+
+
+
+
+
+	private boolean DBSessionCheck() 
+	{
+		//		boolean mariaResult = false;
+		boolean oracleResult = false;
+		boolean result = false;
+
+		try 
+		{
+			if ( ( this.dbSessionCheckIntervalMs / this.threadDelay ) >= this.dbSessionCheckCount )
+			{
+				this.dbSessionCheckCount++;
+				//				mariaResult = true;
+				oracleResult = true;
+				//				result = mariaResult && oracleResult;
+				result = oracleResult;
+				return result;
+			}
+			else
+			{
+				//				mariaResult = ( this.mariaDbHandler.isConnect() > 0 ? true : false );
+				oracleResult = ( this.oracleDbHandler.isConnect() > 0 ? true : false );
+
+				this.dbSessionCheckCount = 0;
+
+			}
+
+
+			//			result = mariaResult && oracleResult;
+			result = oracleResult;
+			return result;
+		}
+		catch ( Exception e ) 
+		{
+			Logger.error( e );
+			return false;
+		}
+		finally 
+		{
+			if ( this.dbSessionCheckCount == this.dbSessionCheckIntervalMs )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][Oracle session check. Check interval '%3$d'. ] - %4$s", 
+						this.procname, 
+						( result ? "RUNNING" : "ERROR" ),
+						this.dbSessionCheckIntervalMs,
+						( result ? "SUCCESS" : "FAIL" ) ), 
+						LoggerElements.LOG_LEVEL1 );
+			}
+		}
+	}
+
+
+
+
+	//온라인 인증 내역 INSERT
+	private boolean insertWCFFD114TH(LinkedHashMap<String, byte[]> parsedTelegram)
+	{
+		boolean result = false;
+
+		String LOG_COL_DY = "";
+		String LOG_COL_TM = "";
+		String CD_UNQ_ID = "";
+		String LOG_RNDM_KEY = "";
+
+		try
+		{
+			/* Key validation */
+			if ( parsedTelegram == null
+					|| parsedTelegram.size() == 0 )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][insertWCFFD114TH. parsedTelegram is null ] - FAIL", 
+						this.procname,
+						"ERROR" ), 
+						LoggerElements.LOG_LEVEL1 );
+				return result;
+			}
+
+			LOG_COL_DY = parsedTelegram.get("LOG_COL_DY") != null ? new String( parsedTelegram.get("LOG_COL_DY") ) : "";
+			LOG_COL_TM = parsedTelegram.get("LOG_COL_TM") != null ? new String( parsedTelegram.get("LOG_COL_TM") ) : "";
+			CD_UNQ_ID = parsedTelegram.get("CD_UNQ_ID") != null ? new String( parsedTelegram.get("CD_UNQ_ID") ) : "";
+			LOG_RNDM_KEY = parsedTelegram.get("LOG_RNDM_KEY") != null ? new String( parsedTelegram.get("LOG_RNDM_KEY") ) : "";
+
+			if( LOG_COL_DY.equals("") 
+					|| LOG_COL_TM.equals("")
+					|| CD_UNQ_ID.equals("")
+					|| LOG_RNDM_KEY.equals(""))
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][insertWCFFD114TH. Primary key is null ] - FAIL", 
+						this.procname,
+						"ERROR" ), 
+						LoggerElements.LOG_LEVEL1 );
+				return result;
+			}
+
+			int idx = 1 ;
+
+			this.oraclePsmtArr[0].setString( idx++, LOG_COL_DY );
+			this.oraclePsmtArr[0].setString( idx++, LOG_COL_TM );
+			this.oraclePsmtArr[0].setString( idx++, CD_UNQ_ID );
+			this.oraclePsmtArr[0].setString( idx++, LOG_RNDM_KEY );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("SEX_DIS") != null ? new String( parsedTelegram.get("SEX_DIS") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("AGE") != null ? new String( parsedTelegram.get("AGE") ) : "0" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("TRN_AM") != null ? new String( parsedTelegram.get("TRN_AM") ) : "0" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("SVC_CD") != null ? new String( parsedTelegram.get("SVC_CD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("SHOPM_CD") != null ? new String( parsedTelegram.get("SHOPM_CD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("FATR_3_CRT_APYN") != null ? new String( parsedTelegram.get("FATR_3_CRT_APYN") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("MCH_NO") != null ? new String( parsedTelegram.get("MCH_NO") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("PRD_NM") != null ? new String( parsedTelegram.get("PRD_NM") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("TRN_YN") != null ? new String( parsedTelegram.get("TRN_YN") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("TRN_DY") != null ? new String( parsedTelegram.get("TRN_DY") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("TRN_TM") != null ? new String( parsedTelegram.get("TRN_TM") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("CD_NO") != null ? new String( parsedTelegram.get("CD_NO") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("CRT_SUC_YN") != null ? new String( parsedTelegram.get("CRT_SUC_YN") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("RPS_IP") != null ? new String( parsedTelegram.get("RPS_IP") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("RPS_IP_NAT_CD") != null ? new String( parsedTelegram.get("RPS_IP_NAT_CD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("RPS_UUID") != null ? new String( parsedTelegram.get("RPS_UUID") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("ERR_CD") != null ? new String( parsedTelegram.get("ERR_CD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("JUD_NO") != null ? new String( parsedTelegram.get("JUD_NO") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("JUD_RST_CD") != null ? new String( parsedTelegram.get("JUD_RST_CD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("JUD_RSN_CD") != null ? new String( parsedTelegram.get("JUD_RSN_CD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("RPS_SRCH_RULE_ID") != null ? new String( parsedTelegram.get("RPS_SRCH_RULE_ID") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("SRCH_RULE_LIST") != null ? new String( parsedTelegram.get("SRCH_RULE_LIST") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("RPS_XCP_RULE_ID") != null ? new String( parsedTelegram.get("RPS_XCP_RULE_ID") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("XCP_RULE_LIST") != null ? new String( parsedTelegram.get("XCP_RULE_LIST") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("XCP_TGT_TPCD") != null ? new String( parsedTelegram.get("XCP_TGT_TPCD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("CHNL_DSCD") != null ? new String( parsedTelegram.get("CHNL_DSCD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("NAT_IP") != null ? new String( parsedTelegram.get("NAT_IP") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("NAT_IP_ACQR_ERR_CD") != null ? new String( parsedTelegram.get("NAT_IP_ACQR_ERR_CD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("IP_NAT_CD") != null ? new String( parsedTelegram.get("IP_NAT_CD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("ETHN_0_IP") != null ? new String( parsedTelegram.get("ETHN_0_IP") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("ETHN_0_MAC") != null ? new String( parsedTelegram.get("ETHN_0_MAC") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("PROXY_USE_YN") != null ? new String( parsedTelegram.get("PROXY_USE_YN") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("PROXY_IP") != null ? new String( parsedTelegram.get("PROXY_IP") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("PROXY_SVR_IP") != null ? new String( parsedTelegram.get("PROXY_SVR_IP") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("PROXY_NAT_CD") != null ? new String( parsedTelegram.get("PROXY_NAT_CD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("VPN_USE_YN") != null ? new String( parsedTelegram.get("VPN_USE_YN") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("VPN_IP") != null ? new String( parsedTelegram.get("VPN_IP") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("VPN_CLNT_IP") != null ? new String( parsedTelegram.get("VPN_CLNT_IP") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("VPN_NAT_CD") != null ? new String( parsedTelegram.get("VPN_NAT_CD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("OS_LANG_CD") != null ? new String( parsedTelegram.get("OS_LANG_CD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("DISK_MDL") != null ? new String( parsedTelegram.get("DISK_MDL") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("DISK_SER") != null ? new String( parsedTelegram.get("DISK_SER") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("USB_SER_1") != null ? new String( parsedTelegram.get("USB_SER_1") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("USB_NPKI_INCL_1") != null ? new String( parsedTelegram.get("USB_NPKI_INCL_1") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("HACK_BLOC_STS") != null ? new String( parsedTelegram.get("HACK_BLOC_STS") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("KEYB_SCRT_STS") != null ? new String( parsedTelegram.get("KEYB_SCRT_STS") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("WIN_FW_STCD") != null ? new String( parsedTelegram.get("WIN_FW_STCD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("WIN_RTM_ALW_YN") != null ? new String( parsedTelegram.get("WIN_RTM_ALW_YN") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("WIN_RTM_IP") != null ? new String( parsedTelegram.get("WIN_RTM_IP") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("HP_DIS") != null ? new String( parsedTelegram.get("HP_DIS") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("UUID") != null ? new String( parsedTelegram.get("UUID") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("UUID_2") != null ? new String( parsedTelegram.get("UUID_2") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("PBUSE_OS_VER") != null ? new String( parsedTelegram.get("PBUSE_OS_VER") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("ANDR_MCN_MFCO") != null ? new String( parsedTelegram.get("ANDR_MCN_MFCO") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("ANDR_TRM_ID") != null ? new String( parsedTelegram.get("ANDR_TRM_ID") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("ANDR_TRM_TEL_NO") != null ? new String( parsedTelegram.get("ANDR_TRM_TEL_NO") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("ANDR_NTWK_NAT_CD") != null ? new String( parsedTelegram.get("ANDR_NTWK_NAT_CD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("ANDR_SIM_NAT_CD") != null ? new String( parsedTelegram.get("ANDR_SIM_NAT_CD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("ANDR_NTWK_BIZPE_CD") != null ? new String( parsedTelegram.get("ANDR_NTWK_BIZPE_CD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("ANDR_SIM_BIZPE_NM") != null ? new String( parsedTelegram.get("ANDR_SIM_BIZPE_NM") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("ANDR_TRM_KD") != null ? new String( parsedTelegram.get("ANDR_TRM_KD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("ANDR_ENTPE_ID") != null ? new String( parsedTelegram.get("ANDR_ENTPE_ID") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("PBUSE_NTWK_INF") != null ? new String( parsedTelegram.get("PBUSE_NTWK_INF") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("PBUSE_TRM_MAC_INF") != null ? new String( parsedTelegram.get("PBUSE_TRM_MAC_INF") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("PBUSE_LOOTING_YN") != null ? new String( parsedTelegram.get("PBUSE_LOOTING_YN") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("PBUSE_APP_EXE_YN") != null ? new String( parsedTelegram.get("PBUSE_APP_EXE_YN") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("BPSS_YN") != null ? new String( parsedTelegram.get("BPSS_YN") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("WEB_IP") != null ? new String( parsedTelegram.get("WEB_IP") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("WEB_IP_NAT_CD_2") != null ? new String( parsedTelegram.get("WEB_IP_NAT_CD_2") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("USE_MAC") != null ? new String( parsedTelegram.get("USE_MAC") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("ETHN_0_GTW_IP") != null ? new String( parsedTelegram.get("ETHN_0_GTW_IP") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("ETHN_0_GTW_MAC") != null ? new String( parsedTelegram.get("ETHN_0_GTW_MAC") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("ETHN_0_DHCP_IP") != null ? new String( parsedTelegram.get("ETHN_0_DHCP_IP") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("CPU_ID_1") != null ? new String( parsedTelegram.get("CPU_ID_1") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("IMEI_NO") != null ? new String( parsedTelegram.get("IMEI_NO") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("IMSI_NO") != null ? new String( parsedTelegram.get("IMSI_NO") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("TRM_MDL_NM") != null ? new String( parsedTelegram.get("TRM_MDL_NM") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("BRWS_USER_LANG") != null ? new String( parsedTelegram.get("BRWS_USER_LANG") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("BRWS_LANG") != null ? new String( parsedTelegram.get("BRWS_LANG") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("BRWS_SYS_LANG") != null ? new String( parsedTelegram.get("BRWS_SYS_LANG") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("SYS_LANG") != null ? new String( parsedTelegram.get("SYS_LANG") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("SYS_GMT") != null ? new String( parsedTelegram.get("SYS_GMT") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("PSN_KEY") != null ? new String( parsedTelegram.get("PSN_KEY") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("PSN_VRF_KEY") != null ? new String( parsedTelegram.get("PSN_VRF_KEY") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("CVS_VAL") != null ? new String( parsedTelegram.get("CVS_VAL") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("PSN_KEY_XST_YN") != null ? new String( parsedTelegram.get("PSN_KEY_XST_YN") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("DTC_TPCD") != null ? new String( parsedTelegram.get("DTC_TPCD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("DTC_TPCD") != null ? new String( parsedTelegram.get("DTC_TPCD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("DTC_TPCD") != null ? new String( parsedTelegram.get("DTC_TPCD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("DTC_TPCD") != null ? new String( parsedTelegram.get("DTC_TPCD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("DTC_PRN_ID") != null ? new String( parsedTelegram.get("DTC_PRN_ID") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("DTC_PRN_ID") != null ? new String( parsedTelegram.get("DTC_PRN_ID") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("DTC_PRN_ID") != null ? new String( parsedTelegram.get("DTC_PRN_ID") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("DTC_PRN_ID") != null ? new String( parsedTelegram.get("DTC_PRN_ID") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("DTC_APP_NM") != null ? new String( parsedTelegram.get("DTC_APP_NM") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("DTC_APP_NM") != null ? new String( parsedTelegram.get("DTC_APP_NM") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("DTC_APP_NM") != null ? new String( parsedTelegram.get("DTC_APP_NM") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("DTC_APP_NM") != null ? new String( parsedTelegram.get("DTC_APP_NM") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("DTC_APP_ID") != null ? new String( parsedTelegram.get("DTC_APP_ID") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("DTC_APP_ID") != null ? new String( parsedTelegram.get("DTC_APP_ID") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("DTC_APP_ID") != null ? new String( parsedTelegram.get("DTC_APP_ID") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("DTC_APP_ID") != null ? new String( parsedTelegram.get("DTC_APP_ID") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("DTC_DTL_TPCD") != null ? new String( parsedTelegram.get("DTC_DTL_TPCD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("DTC_DTL_TPCD") != null ? new String( parsedTelegram.get("DTC_DTL_TPCD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("DTC_DTL_TPCD") != null ? new String( parsedTelegram.get("DTC_DTL_TPCD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("DTC_DTL_TPCD") != null ? new String( parsedTelegram.get("DTC_DTL_TPCD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("DTC_CN") != null ? new String( parsedTelegram.get("DTC_CN") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("CD_BRN_CD") != null ? new String( parsedTelegram.get("CD_BRN_CD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("CD_HLDPE_DIS_CD") != null ? new String( parsedTelegram.get("CD_HLDPE_DIS_CD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("CD_ISU_DY") != null ? new String( parsedTelegram.get("CD_ISU_DY") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("CD_PAS_NXTNM") != null ? new String( parsedTelegram.get("CD_PAS_NXTNM") ) : "0" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("CD_TPCD") != null ? new String( parsedTelegram.get("CD_TPCD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("CD_RK_DSCD") != null ? new String( parsedTelegram.get("CD_RK_DSCD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("CD_PRD_CD") != null ? new String( parsedTelegram.get("CD_PRD_CD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("CD_ISUCO_RSN_CD") != null ? new String( parsedTelegram.get("CD_ISUCO_RSN_CD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("CD_FMLY_REL_CD") != null ? new String( parsedTelegram.get("CD_FMLY_REL_CD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("MBR_NO") != null ? new String( parsedTelegram.get("MBR_NO") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("MBR_CD_ISUPE_CUS_NO") != null ? new String( parsedTelegram.get("MBR_CD_ISUPE_CUS_NO") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("MBR_CD_HLDPE_CUS_NO") != null ? new String( parsedTelegram.get("MBR_CD_HLDPE_CUS_NO") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("MBR_CD_HLDPE_SEX") != null ? new String( parsedTelegram.get("MBR_CD_HLDPE_SEX") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("MBR_CD_HLDPE_AGE") != null ? new String( parsedTelegram.get("MBR_CD_HLDPE_AGE") ) : "0" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("MBR_PSN_CO_DSCD") != null ? new String( parsedTelegram.get("MBR_PSN_CO_DSCD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("MBR_FRNPE_DSCD") != null ? new String( parsedTelegram.get("MBR_FRNPE_DSCD") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("MBR_BZNO") != null ? new String( parsedTelegram.get("MBR_BZNO") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("MBR_CORPNO") != null ? new String( parsedTelegram.get("MBR_CORPNO") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("MCH_BZNO") != null ? new String( parsedTelegram.get("MCH_BZNO") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("MCH_NM") != null ? new String( parsedTelegram.get("MCH_NM") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("RDY_ITM") != null ? new String( parsedTelegram.get("RDY_ITM") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("DL_SCORE") != null ? new String( parsedTelegram.get("DL_SCORE") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("DL_CUF_SCR") != null ? new String( parsedTelegram.get("DL_CUF_SCR") ) : "0" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("DL_SCORE_RSN") != null ? new String( parsedTelegram.get("DL_SCORE_RSN") ) : "0" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("DL_MDL_SVC_ID") != null ? new String( parsedTelegram.get("DL_MDL_SVC_ID") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("DL_MDL_RULE_ID") != null ? new String( parsedTelegram.get("DL_MDL_RULE_ID") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("DL_MDL_RULE_ID") != null ? new String( parsedTelegram.get("DL_MDL_RULE_ID") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("DL_ELAP_MS") != null ? new String( parsedTelegram.get("DL_ELAP_MS") ) : "0" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("OS_INF") != null ? new String( parsedTelegram.get("OS_INF") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("BRWS_INF") != null ? new String( parsedTelegram.get("BRWS_INF") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("BRWS_APP_NM") != null ? new String( parsedTelegram.get("BRWS_APP_NM") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("BRWS_APP_CODE_NM") != null ? new String( parsedTelegram.get("BRWS_APP_CODE_NM") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("BRWS_VER") != null ? new String( parsedTelegram.get("BRWS_VER") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("ANDROID_ID") != null ? new String( parsedTelegram.get("ANDROID_ID") ) : "" );
+			this.oraclePsmtArr[0].setString( idx++, parsedTelegram.get("WIDEVINE_ID") != null ? new String( parsedTelegram.get("WIDEVINE_ID") ) : "" );
+
+
+			/* Execute sql */
+			if ( this.oraclePsmtArr[0].executeUpdate() > 0 )	// insert  결과
+				result = true;
+
+
+			return result;
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+			return false;
+		}
+		finally
+		{
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][insertWCFFD114TH.] - %3$s", 
+					this.procname,
+					( result ? "RUNNING" : "ERROR" ), 
+					( result ? "SUCCESS" : "FAIL" ) ), 
+					LoggerElements.LOG_LEVEL1 );
+		}
+	}
+
+
+
+
+
+
+
+
+	// 악성앱 테이블 ISNERT
+	private boolean insertWCFFD114TF(LinkedHashMap<String, byte[]> parsedTelegram)
+	{
+		boolean result = false;
+
+		final String DTC_SPLIT_VALUE = "[|]";
+
+
+		String LOG_COL_DY = "";
+		String LOG_COL_TM = "";
+		String LOG_RNDM_KEY_NO = "";
+
+
+		String[] arrDTC_TPCD = null;
+		String[] arrDTC_PRN_ID = null;
+		String[] arrDTC_APP_NM = null;
+		String[] arrDTC_DTL_TPCD = null;
+		String[] arrDTC_APP_ID = null;
+
+		int DTC_CN = 0;
+
+		try
+		{
+			/* Key validation */
+			if ( parsedTelegram == null
+					|| parsedTelegram.size() == 0 )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][insertWCFFD114TF. parsedTelegram is null ] - FAIL", 
+						this.procname,
+						"ERROR" ), 
+						LoggerElements.LOG_LEVEL1 );
+				return result;
+			}
+
+			LOG_COL_DY = parsedTelegram.get("LOG_COL_DY") != null ? new String( parsedTelegram.get("LOG_COL_DY") ) : "";
+			LOG_COL_TM = parsedTelegram.get("LOG_COL_TM") != null ? new String( parsedTelegram.get("LOG_COL_TM") ) : "";
+			LOG_RNDM_KEY_NO = parsedTelegram.get("LOG_RNDM_KEY") != null ? new String( parsedTelegram.get("LOG_RNDM_KEY") ) : "";
+
+
+			if( LOG_COL_DY.equals("") 
+					|| LOG_COL_TM.equals("")
+					|| LOG_RNDM_KEY_NO.equals("") )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][insertWCFFD114TF. Primary key is null ] - FAIL", 
+						this.procname,
+						"ERROR" ), 
+						LoggerElements.LOG_LEVEL1 );
+				return result;
+			}
+
+
+
+			DTC_CN = parsedTelegram.get("DTC_CN") != null && !new String( parsedTelegram.get("DTC_CN") ).equals("")  ? Integer.parseInt( new String( parsedTelegram.get("DTC_CN") ) ) : 0;
+
+
+			if( DTC_CN == 0 )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][insertWCFFD114TF. DTC_CN is '0' ] - PASS", 
+						this.procname,
+						"RUNNING" ), 
+						LoggerElements.LOG_LEVEL1 );
+				result = true;
+				return result;
+			}
+
+
+			arrDTC_TPCD = parsedTelegram.get("DTC_TPCD") != null ? new String( parsedTelegram.get("DTC_TPCD") ).split( DTC_SPLIT_VALUE ) : null;
+			arrDTC_PRN_ID = parsedTelegram.get("DTC_PRN_ID") != null ? new String( parsedTelegram.get("DTC_PRN_ID") ).split( DTC_SPLIT_VALUE ) : null;
+			arrDTC_APP_NM = parsedTelegram.get("DTC_APP_NM") != null ? new String( parsedTelegram.get("DTC_APP_NM") ).split( DTC_SPLIT_VALUE ) : null;
+			arrDTC_DTL_TPCD = parsedTelegram.get("DTC_DTL_TPCD") != null ? new String( parsedTelegram.get("DTC_DTL_TPCD") ).split( DTC_SPLIT_VALUE ) : null;
+			arrDTC_APP_ID = parsedTelegram.get("DTC_APP_ID") != null ? new String( parsedTelegram.get("DTC_APP_ID") ).split( DTC_SPLIT_VALUE ) : null;
+
+			if( arrDTC_TPCD == null
+					|| arrDTC_PRN_ID == null
+					|| arrDTC_APP_NM == null
+					|| arrDTC_DTL_TPCD == null
+					|| arrDTC_APP_ID == null )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][insertWCFFD114TF. DTC value is null ] - FAIL", 
+						this.procname,
+						"ERROR" ), 
+						LoggerElements.LOG_LEVEL1 );
+
+				return result;
+			}
+
+
+
+
+
+			for(int i = 0 ; i < DTC_CN ; i++ )
+			{
+				int idx = 1 ;
+
+				this.oraclePsmtArr[1].setString( idx++, LOG_COL_DY);
+				this.oraclePsmtArr[1].setString( idx++, LOG_COL_TM);
+				this.oraclePsmtArr[1].setString( idx++, LOG_RNDM_KEY_NO);
+
+				this.oraclePsmtArr[1].setString( idx++, arrDTC_TPCD.length > i ? arrDTC_TPCD[i] : "N" );
+				this.oraclePsmtArr[1].setString( idx++, ( arrDTC_PRN_ID.length > i && arrDTC_PRN_ID[i].length() == 19 )? arrDTC_PRN_ID[i] : String.format("N/A %1$d", i) );
+				this.oraclePsmtArr[1].setString( idx++, arrDTC_APP_NM.length > i ? arrDTC_APP_NM[i] : String.format("N/A %1$d", i) );
+				this.oraclePsmtArr[1].setString( idx++, arrDTC_APP_ID.length > i ? arrDTC_APP_ID[i] : String.format("N/A %1$d", i) );
+				this.oraclePsmtArr[1].setString( idx++, arrDTC_DTL_TPCD.length > i ? arrDTC_DTL_TPCD[i] : String.format("N%1$d", i) );
+
+				this.oraclePsmtArr[1].setInt( idx++, DTC_CN);
+
+				if ( this.oraclePsmtArr[1].executeUpdate() < 1 )	// insert  결과
+				{
+					Logger.sysInfo(String.format(
+							"[%1$-20s][%2$-10s][insertWCFFD114TF. insert execute fail ] - FAIL", 
+							this.procname,
+							"ERROR" ), 
+							LoggerElements.LOG_LEVEL1 );
+
+					return result;
+				}
+
+			}
+
+
+
+
+			result = true;
+
+			return result;
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+			return false;
+		}
+		finally
+		{
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][insertWCFFD114TF. insert CNT '%3$s'] - %4$s", 
+					this.procname,
+					( result ? "RUNNING" : "ERROR" ),
+					DTC_CN,
+					( result ? "SUCCESS" : "FAIL" ) ), 
+					LoggerElements.LOG_LEVEL1 );
+		}
+	}
+
+
+
+
+
+
+
+	/***
+	 * 
+	 * @param parsedTelegram		//전문
+	 * @param SRCH_RULE_ID			//룰 ID
+	 * @param BLOC_LIST_TGT_TP		//대상구분
+	 * @param TGT_VAL				//대상 값
+	 * @param ALT_TGT_TP			//ALERT대상유형     'S' -> score , 'P' ->정책  , 'B' -> BL  
+	 * @return
+	 */
+	// 알람 테이블 INSERT
+	private boolean insertOnlAlert( LinkedHashMap<String, byte[]> parsedTelegram , String SRCH_RULE_ID , String BLOC_LIST_TGT_TP , String TGT_VAL , String ALT_TGT_TP  )
+	{
+		boolean result = false;
+
+		String TRN_DY = "";
+		String TRN_TM = "";
+		String JUD_NO = "";
+		String SYS_CD = "";
+		String JUD_RST_CD = "";
+		// SRCH_RULE_ID -> ruleInfo의 각 RULE ID 저장
+
+		String APL_CD = "01";		//업무코드 : 01[인증이력]  , 02[온라인접속이력] , 03[ARS접속이력]
+		try
+		{
+			/* Key validation */
+			if ( parsedTelegram == null
+					|| parsedTelegram.size() == 0 )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][insertOnlAlert. parsedTelegram is null ] - FAIL", 
+						this.procname,
+						"ERROR" ), 
+						LoggerElements.LOG_LEVEL1 );
+				return result;
+			}
+
+			TRN_DY = parsedTelegram.get("LOG_COL_DY") != null ? new String( parsedTelegram.get("LOG_COL_DY") ) : "";
+			TRN_TM = parsedTelegram.get("LOG_COL_TM") != null ? new String( parsedTelegram.get("LOG_COL_TM") ) : "";
+			JUD_NO = parsedTelegram.get("JUD_NO") != null ? new String( parsedTelegram.get("JUD_NO") ) : "";
+			JUD_RST_CD = parsedTelegram.get("JUD_RST_CD") != null ? new String( parsedTelegram.get("JUD_RST_CD") ) : "";
+			SYS_CD = parsedTelegram.get("SYS_CD") != null ? new String( parsedTelegram.get("SYS_CD") ) : "";
+
+			if( TRN_DY.equals("") 
+					|| TRN_TM.equals("")
+					|| JUD_NO.equals("") )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][insertOnlAlert. Primary key is null ] - FAIL", 
+						this.procname,
+						"ERROR" ), 
+						LoggerElements.LOG_LEVEL1 );
+				return result;
+			}
+
+			int idx = 1 ;
+
+			this.oraclePsmtArr[2].setString( idx++, TRN_DY );
+			this.oraclePsmtArr[2].setString( idx++, TRN_TM );
+			this.oraclePsmtArr[2].setString( idx++, JUD_NO );
+			this.oraclePsmtArr[2].setString( idx++, SRCH_RULE_ID.replace(".", "") );		// RULE_ID
+
+			this.oraclePsmtArr[2].setString( idx++, BLOC_LIST_TGT_TP );	// 블록리스트대상유형
+			this.oraclePsmtArr[2].setString( idx++, TGT_VAL );			// 대상값
+			this.oraclePsmtArr[2].setString( idx++, APL_CD );			// 업무코드 
+			this.oraclePsmtArr[2].setString( idx++, SYS_CD );
+			this.oraclePsmtArr[2].setString( idx++, JUD_RST_CD );		// 판정결과코드	VARCHAR2  00:정상, 01:검색룰판정, 02:예외룰판정, 03:ALERT
+			this.oraclePsmtArr[2].setString( idx++, ALT_TGT_TP );		// ALERT대상유형     'S' -> score , 'P' ->정책  , 'B' -> BL
+
+
+			this.oraclePsmtArr[2].setString( idx++, parsedTelegram.get("DL_SCORE") != null ? new String( parsedTelegram.get("DL_SCORE") ) : "0" );
+			this.oraclePsmtArr[2].setString( idx++, parsedTelegram.get("DL_CUF_SCR") != null ? new String( parsedTelegram.get("DL_CUF_SCR") ) : "0" );
+			this.oraclePsmtArr[2].setString( idx++, parsedTelegram.get("DL_SCORE_RSN") != null ? new String( parsedTelegram.get("DL_SCORE_RSN") ) : "" );
+			this.oraclePsmtArr[2].setString( idx++, parsedTelegram.get("DL_MDL_SVC_ID") != null ? new String( parsedTelegram.get("DL_MDL_SVC_ID") ) : "" );
+			this.oraclePsmtArr[2].setString( idx++, parsedTelegram.get("DL_MDL_ID") != null ? new String( parsedTelegram.get("DL_MDL_ID") ) : "" );
+			this.oraclePsmtArr[2].setString( idx++, parsedTelegram.get("DL_MDL_RULE_ID") != null ? new String( parsedTelegram.get("DL_MDL_RULE_ID") ) : "" );
+
+			/* Execute sql */
+			if ( this.oraclePsmtArr[2].executeUpdate() > 0 )	// insert  결과
+				result = true;
+
+
+			return result;
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+			return false;
+		}
+		finally
+		{
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][insertOnlAlert. Insert into WCFFD122TH] - %3$s", 
+					this.procname,
+					( result ? "RUNNING" : "ERROR" ), 
+					( result ? "SUCCESS" : "FAIL" ) ), 
+					LoggerElements.LOG_LEVEL1 );
+		}
+
+	}
+
+
+
+
+
+
+
+	// 예외정책 테이블 SELECT
+	private int selectWCFFD402TH( String plcyTgtTpcd , String plcyTgtId )
+	{
+
+		boolean result = false;
+		int plcyTgtResult = 0;
+		ResultSet rs = null;
+
+		try 
+		{
+
+			if( plcyTgtTpcd == null 
+					|| plcyTgtId == null )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][selectWCFFD402TH. Parameter is null. ] - FAIL", 
+						this.procname,
+						"ERROR" ), 
+						LoggerElements.LOG_LEVEL1 );
+			}
+
+			int index = 1;
+
+			this.oraclePsmtArr[3].setString( index++, plcyTgtTpcd);
+			this.oraclePsmtArr[3].setString( index++, plcyTgtId);
+
+			rs = this.oraclePsmtArr[3].executeQuery();
+
+			if( rs == null )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][selectWCFFD402TH. ResultSet is null. '%3$s' ] - FAIL", 
+						this.procname,
+						"ERROR",
+						BusinessQuery.SELECT_RULE_FUNC ), 
+						LoggerElements.LOG_LEVEL1 );
+
+				return 0;
+			}
+
+			if( rs.next() )
+			{
+				plcyTgtResult = rs.getInt("CNT");
+			}
+
+			result = true;
+			return plcyTgtResult;
+		}
+		catch (Exception e) 
+		{
+			Logger.error( e );
+			return 0;
+		}
+		finally
+		{
+			if( rs != null )
+			{
+				try { rs.close(); } catch (SQLException e) { Logger.error( e );	}
+				rs = null;
+			}
+
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][selectWCFFD402TH. plcyTgtResult : '%3$s'] - %4$s", 
+					this.procname,
+					(result ? "RUNNING" : "ERROR"),
+					plcyTgtResult,
+					(result ? "SUCCESS" : "FAIL")), 
+					LoggerElements.LOG_LEVEL1 );
+		}
+	}
+
+
+
+
+
+
+
+	//룰 판정 결과 값 셋팅
+	private boolean getJUDValue(LinkedHashMap<String, byte[]> parsedTelegram , String[] DETECT_RID_LISTS)
+	{
+		boolean result = false;
+
+		String RPS_SRCH_RULE_ID = "";	//대표검색RULE ID
+		String SRCH_RULE_LIST = "";		//검색 RULE 목록
+
+		int RPS_SRCH_RULE_IMPORTANCE = -1;
+
+		String RPS_XCP_RULE_ID = "";	//대표예외 룰 
+		String XCP_RULE_LIST = "";		//예외 룰 목록
+		String XCP_TGT_TPCD = "";		// 예외대상유형코드 - 01:예외정책, 02:예외룰
+
+		int RPS_XCP_RULE_IMPORTANCE = -1;
+
+		String JUD_RST_CD = "00"; //판정 결과 코드
+		String JUD_RSN_CD = ""; //판정 사유 코드	
+
+
+		String BLX_RULE_ID = "";
+		int BLX_RULE_ID_IMPORTANCE = -1;
+
+		try 
+		{
+
+			if( Manager.ruleInfo.size() == 0 )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][getJUDValue. NO RULE INFO ] - %3$s", 
+						this.procname,
+						"ERROR",
+						"FAIL" ), 
+						LoggerElements.LOG_LEVEL1 );
+
+				return false;
+			}
+
+			if( DETECT_RID_LISTS == null
+					|| DETECT_RID_LISTS.length == 0)
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][getJUDValue. NO RULE DETCH ] - %3$s", 
+						this.procname,
+						"RUNNING",
+						"PASS" ), 
+						LoggerElements.LOG_LEVEL1 );
+
+				parsedTelegram.put( "JUD_RST_CD", JUD_RST_CD.getBytes() );
+
+				result = true;
+				return result;
+			}
+
+			// 초기 검색 룰으로 셋팅
+			JUD_RST_CD = "01";
+
+			// 룰 관련 컬럼 값 셋팅 및 판정 관련 값 셋팅
+			for( String DETCH_RULE : DETECT_RID_LISTS )
+			{
+				// 현제 룰 information
+				String RULE_TYPE = Manager.ruleInfo.get(DETCH_RULE).getRULE_TYPE();
+				int RULE_IMPORTANCE = Manager.ruleInfo.get(DETCH_RULE).getRULE_IMPORTANCE();
+
+				LinkedHashMap<String, ruleMethodInformation> ruleMethodList = null;
+
+				if( Manager.ruleInfo.get(DETCH_RULE).getFUNC_LIST() != null
+						&& Manager.ruleInfo.get(DETCH_RULE).getFUNC_LIST().size() != 0)
+				{
+					ruleMethodList = Manager.ruleInfo.get(DETCH_RULE).getFUNC_LIST();
+				}
+
+
+
+				//기본  대표 룰 , 기본 룰 리스트 셋팅  
+				if( RULE_TYPE.equals("RT.0001") )		// RT.0001 -> 기본 룰
+				{
+
+					if( RPS_SRCH_RULE_ID.equals("") 
+							|| RULE_IMPORTANCE > RPS_SRCH_RULE_IMPORTANCE )
+					{
+						RPS_SRCH_RULE_ID = DETCH_RULE;
+						RPS_SRCH_RULE_IMPORTANCE = RULE_IMPORTANCE;
+
+					}
+					SRCH_RULE_LIST += DETCH_RULE;
+
+
+					if( ruleMethodList != null && !JUD_RST_CD.equals("02"))
+					{
+
+						// BL , BLX 일때 판정 결과 , 판정 사유 값 셋팅
+						for( String funcSubMethod : ruleMethodList.keySet() )
+						{
+							if( !this.BL_FUNC_ID_LIST.contains(ruleMethodList.get( funcSubMethod ).getFUNC_ID())
+									&& !this.BLX_FUNC_ID_LIST.contains(ruleMethodList.get( funcSubMethod ).getFUNC_ID()))
+							{
+								continue;
+							}
+
+							if( this.BLX_FUNC_ID_LIST.contains(ruleMethodList.get( funcSubMethod ).getFUNC_ID()) )			// 우선순위가 제일 높은 BLX 룰 저장
+							{
+								if( RULE_IMPORTANCE > BLX_RULE_ID_IMPORTANCE )
+								{
+									BLX_RULE_ID = DETCH_RULE;
+									BLX_RULE_ID_IMPORTANCE = RULE_IMPORTANCE;
+								}
+							}
+
+							String[] arrArgvalue = ruleMethodList.get( funcSubMethod ).getARG_VALUE().split(",");		//집께 함수 args 값 배열로 변환 
+
+							String blocListTp[] = arrArgvalue[0].split("=");		// BL구분
+							if( !JUD_RST_CD.equals("02")						
+									&& blocListTp[1].equals("901") )			// "901"-> 차단 , "801"->추가인증
+							{
+								JUD_RST_CD = "03";
+								JUD_RSN_CD = DETCH_RULE;
+							}
+
+							// 예외 정책 테이블 select 
+							if( arrArgvalue.length > 3  )  	// 예외 정책 테이블 조회시 필요한 값 확인
+							{
+								String[] plcyTgtTpcd = arrArgvalue[1].split("=");		// 대상 구분
+								String[] plcyTgtId = arrArgvalue[2].split("=");			// 대상 값
+
+								if( plcyTgtId[1].charAt(0)  == '$' )					//전문 값 일경우 parsedTelegram에서 값 셋팅 ( '$' 값을떄는 전문에 값 셋팅 )
+								{
+									plcyTgtId[1] = plcyTgtId[1].replace("$", "");
+									plcyTgtId[1] = plcyTgtId[1].replace("{", "");
+									plcyTgtId[1] = plcyTgtId[1].replace("}", "");
+
+									plcyTgtId[1] = parsedTelegram.get(plcyTgtId[1]) != null ?  new String( parsedTelegram.get(plcyTgtId[1]) ) : "";
+								}
+
+								if( this.selectWCFFD402TH( plcyTgtTpcd[1], plcyTgtId[1] ) != 0 )		// 예외정책 테이블에 있는 값인지 확인
+								{
+									JUD_RST_CD = "02";		//예외룰 판정
+									JUD_RSN_CD = "";
+									XCP_TGT_TPCD = "01";	//예외대상유형코드 - 01:예외정책
+									break;
+
+								}
+							}
+
+						}
+					}
+
+				}
+
+				//예외  대표 룰 , 예외 룰 리스트 셋팅
+				if( RULE_TYPE.equals("RT.0004") )		// RT.0004 -> 예외 룰
+				{
+					if( RPS_XCP_RULE_ID.equals("") 
+							|| RULE_IMPORTANCE > RPS_XCP_RULE_IMPORTANCE )
+					{
+						RPS_XCP_RULE_ID = DETCH_RULE;
+						RPS_XCP_RULE_IMPORTANCE = RULE_IMPORTANCE;
+
+					}
+
+					XCP_RULE_LIST += DETCH_RULE;
+
+				}
+
+
+			}
+
+			// 예외 룰 일 경우
+			if( !RPS_XCP_RULE_ID.equals("") )
+			{
+				JUD_RST_CD = "02";		//예외룰 판정
+				JUD_RSN_CD = "";
+				XCP_TGT_TPCD = "02";	//예외대상유형코드 - 02:예외룰
+			}
+
+			parsedTelegram.put( "JUD_RST_CD", JUD_RST_CD.getBytes() );
+			parsedTelegram.put( "JUD_RSN_CD", JUD_RSN_CD.replace(".", "").getBytes() );
+			parsedTelegram.put( "RPS_SRCH_RULE_ID", RPS_SRCH_RULE_ID.replace(".", "").getBytes() );
+			parsedTelegram.put( "SRCH_RULE_LIST", SRCH_RULE_LIST.replace(".", "").getBytes() );
+			parsedTelegram.put( "RPS_XCP_RULE_ID", RPS_XCP_RULE_ID.replace(".", "").getBytes() );
+			parsedTelegram.put( "XCP_RULE_LIST", XCP_RULE_LIST.replace(".", "").getBytes() );
+			parsedTelegram.put( "XCP_TGT_TPCD", XCP_TGT_TPCD.getBytes() );
+
+			parsedTelegram.put( "BLX_RULE_ID", BLX_RULE_ID.getBytes() );		// 대표 BLX 룰 저장
+
+			result = true;
+			return result;
+		} 
+		catch (Exception e) 
+		{
+			Logger.error( e );
+			return false;
+		}
+		finally
+		{
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][getJUDValue. JUD_RST_CD : '%3$s' ] - %4$s", 
+					this.procname,
+					(result ? "RUNNING" : "ERROR"),
+					JUD_RST_CD,
+					(result ? "SUCCESS" : "FAIL")), 
+					LoggerElements.LOG_LEVEL1 );
+		}
+	}
+
+
+
+
+
+
+
+	// 집계함수 실행 부분
+	private boolean actionRuleMethod( LinkedHashMap<String, byte[]> parsedTelegram ,  ruleInformation ruleInfo , String DETCH_RULE )
+	{
+		boolean result = false;
+
+
+		ruleMethodInformation ruleMethodInfo = null;
+		LinkedHashMap<String, ruleMethodInformation> ruleMethodList = null;
+
+
+		String BLX_RULE_ID = ""; // 우선순위가 제일 높은 BLX 룰 ID
+		int BLXMethodExecuteCnt = 0;
+		try 
+		{
+			
+			// 해당룰의 집계 함수 존재 여부 확인
+			if( ruleInfo.getFUNC_LIST() == null
+					|| ruleInfo.getFUNC_LIST().size() == 0 )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][actionRuleMethod. RULE ID : '%3$s' no rule method ] - %4$s", 
+						this.procname,
+						"RUNNING",
+						DETCH_RULE,
+						"PASS" ), 
+						LoggerElements.LOG_LEVEL1 );
+
+				result = true;
+				return result;
+
+			}
+
+			ruleMethodList = ruleInfo.getFUNC_LIST();
+			BLX_RULE_ID = parsedTelegram.get("BLX_RULE_ID") != null ?  new String( parsedTelegram.get("BLX_RULE_ID") ) : "";
+			
+			/**
+			 * 룰 별 집계 함수 실행 부분
+			 */
+			for( String FUNC_SUB_ID : ruleMethodList.keySet() )
+			{
+
+				ruleMethodInfo = ruleMethodList.get( FUNC_SUB_ID );
+
+				String query = ruleMethodInfo.getQUERY();
+				String[] BIND_ARGS = ruleMethodInfo.getBIND_ARGS().split(",");
+				String[] ARG_VALUE = ruleMethodInfo.getARG_VALUE().split(",");
+				String FUNC_ID = ruleMethodInfo.getFUNC_ID();
+
+
+				if( this.BL_FUNC_ID_LIST.contains(FUNC_ID) )		//BL ADD 
+				{
+
+					parsedTelegram.put("MTHD_FUL_CHNL_APYN", "Y".getBytes());	//전체 채녈 적용 여부
+					
+
+					if( !this.settingMethodArgs(parsedTelegram, DETCH_RULE, ARG_VALUE , FUNC_SUB_ID ) )		// 집계 함수 변수 셋팅
+						return false;
+						
+					InsertBL inserBl = new InsertBL(this.oracleConn, parsedTelegram );						//bl 관련 추가 로직 실행
+
+//					if( !inserBl.insertWCFFD120TH() )
+//						return false;
+//
+//					if( !this.insertRuleMethod(parsedTelegram, DETCH_RULE, BIND_ARGS, query , FUNC_SUB_ID) )
+//						return false;
+					
+					inserBl.insertWCFFD120TH();
+					
+					this.insertRuleMethod(parsedTelegram, DETCH_RULE, BIND_ARGS, query , FUNC_SUB_ID);
+					
+					String BlocListTp = parsedTelegram.get("MTHD_BLOC_LIST_TP") != null ?  new String( parsedTelegram.get("MTHD_BLOC_LIST_TP") ) : "";
+					String blocListTgtTp  = parsedTelegram.get("MTHD_BLOC_LIST_TGT_TP") != null ?  new String( parsedTelegram.get("MTHD_BLOC_LIST_TGT_TP") ) : "";
+					String tgtVal  = parsedTelegram.get("MTHD_TGT_VAL") != null ?  new String( parsedTelegram.get("MTHD_TGT_VAL") ) : "";
+					if( BlocListTp.equals("901") )
+					{
+//						if( !this.insertOnlAlert( parsedTelegram ,DETCH_RULE ,blocListTgtTp ,tgtVal ,"B"  ) )				//ALERT 테이블 INSERT
+//							return result;
+						
+						this.insertOnlAlert( parsedTelegram ,DETCH_RULE ,blocListTgtTp ,tgtVal ,"B"  );				//ALERT 테이블 INSERT
+					}
+
+				}
+				else if( this.BLX_FUNC_ID_LIST.contains(FUNC_ID) )		//BLX ADD 
+				{
+
+					
+					if( !this.settingMethodArgs(parsedTelegram, DETCH_RULE, ARG_VALUE , FUNC_SUB_ID ) )	// 집계 함수 변수 셋팅
+						return false;
+					
+					
+					if( DETCH_RULE.equals(BLX_RULE_ID) && BLXMethodExecuteCnt == 0 )				//우선 순위가 제일 높은 BLX일 경우만 실행
+					{
+						
+						
+						String CHNL_DSCD = parsedTelegram.get("MTHD_CHNL_DSCD") != null ?  new String( parsedTelegram.get("MTHD_CHNL_DSCD") ) : "";
+						
+						if( CHNL_DSCD.equals("A") )					//전체 채녈 적용 여부
+						{
+							parsedTelegram.put("MTHD_FUL_CHNL_APYN", "Y".getBytes());
+						}
+						else
+						{
+							parsedTelegram.put("MTHD_FUL_CHNL_APYN", "N".getBytes());
+						}
+						
+						
+						InsertBLX inserBlx = new InsertBLX(this.oracleConn, parsedTelegram , CHNL_DSCD);	//blx 관련 추가 로직 실행
+						
+//						if( !inserBlx.insertWCFFD120TH() )
+//							return false;
+//
+//						if( !this.insertRuleMethod(parsedTelegram, DETCH_RULE, BIND_ARGS, query , FUNC_SUB_ID) )
+//							return false;
+						
+						
+						inserBlx.insertWCFFD120TH();
+						
+						this.insertRuleMethod(parsedTelegram, DETCH_RULE, BIND_ARGS, query , FUNC_SUB_ID);
+						
+						BLXMethodExecuteCnt++;
+					}
+
+					String BlocListTp = parsedTelegram.get("MTHD_BLOC_LIST_TP") != null ?  new String( parsedTelegram.get("MTHD_BLOC_LIST_TP") ) : "";
+					String blocListTgtTp  = parsedTelegram.get("MTHD_BLOC_LIST_TGT_TP") != null ?  new String( parsedTelegram.get("MTHD_BLOC_LIST_TGT_TP") ) : "";
+					String tgtVal  = parsedTelegram.get("MTHD_TGT_VAL") != null ?  new String( parsedTelegram.get("MTHD_TGT_VAL") ) : "";
+					if( BlocListTp.equals("901") )
+					{
+//						if( !this.insertOnlAlert( parsedTelegram ,DETCH_RULE ,blocListTgtTp ,tgtVal ,"B"  ) )		//ALERT 테이블 INSERT
+//							return false;
+						
+						this.insertOnlAlert( parsedTelegram ,DETCH_RULE ,blocListTgtTp ,tgtVal ,"B"  );		//ALERT 테이블 INSERT
+					}
+				}
+				else if( this.PLCY_FUNC_ID_LIST.contains(FUNC_ID) )		//PLCY ADD 
+				{
+					if( !this.settingMethodArgs(parsedTelegram, DETCH_RULE, ARG_VALUE , FUNC_SUB_ID ) )		//집계 함수 변수 셋팅
+						return false;
+					
+					
+//					if( !this.insertRuleMethod(parsedTelegram, DETCH_RULE, BIND_ARGS, query , FUNC_SUB_ID) )
+//						return false;
+					
+					this.insertRuleMethod(parsedTelegram, DETCH_RULE, BIND_ARGS, query , FUNC_SUB_ID);
+					
+					String PlcyTpcd = parsedTelegram.get("MTHD_PLCY_TP_CD") != null ?  new String( parsedTelegram.get("MTHD_PLCY_TP_CD") ) : "";
+					String PlcyTgtTpcd  = parsedTelegram.get("MTHD_PLCY_TGT_TP_CD") != null ?  new String( parsedTelegram.get("MTHD_PLCY_TGT_TP_CD") ) : "";
+					String PlcyTgtId  = parsedTelegram.get("MTHD_PLCY_TGT_ID") != null ?  new String( parsedTelegram.get("MTHD_PLCY_TGT_ID") ) : "";
+					if( PlcyTpcd.equals("A") )
+					{
+//						if( !this.insertOnlAlert( parsedTelegram ,DETCH_RULE ,PlcyTgtTpcd ,PlcyTgtId ,"P"  ) )					//ALERT 테이블 INSERT
+//							return false;
+						
+						this.insertOnlAlert( parsedTelegram ,DETCH_RULE ,PlcyTgtTpcd ,PlcyTgtId ,"P"  );					//ALERT 테이블 INSERT
+					}
+				}
+				else		// 이외 룰 METHOD
+				{
+					
+					if( !this.settingMethodArgs(parsedTelegram, DETCH_RULE, ARG_VALUE , FUNC_SUB_ID ) )		//집계 함수 변수 셋팅
+						return false;
+					
+					
+//					if( !this.insertRuleMethod(parsedTelegram, DETCH_RULE, BIND_ARGS, query , FUNC_SUB_ID) )
+//						return false;
+					
+					this.insertRuleMethod(parsedTelegram, DETCH_RULE, BIND_ARGS, query , FUNC_SUB_ID);
+					
+				}
+
+
+			}
+
+
+			result = true;
+			return result;
+		}
+		catch (Exception e) 
+		{
+			Logger.error( e );
+			return false;
+		}
+		finally
+		{
+
+
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][actionRuleMethod. RULE_ID : '%3$s' execute Query ] - %4$s", 
+					this.procname,
+					(result ? "RUNNING" : "ERROR"),
+					DETCH_RULE,
+					(result ? "SUCCESS" : "FAIL")), 
+					LoggerElements.LOG_LEVEL1 );
+		}
+	}
+	
+	
+	
+	
+	
+	
+	
+	
+	//집계 함수 변수 셋팅
+	private boolean settingMethodArgs( LinkedHashMap<String, byte[]> parsedTelegram , String DETCH_RULE , String[] ARG_VALUE , String FUNC_SUB_ID )
+	{
+		
+		boolean result = false;
+		
+		try 
+		{
+			if( ARG_VALUE == null
+					|| ARG_VALUE.length == 0 )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][settingMethodArgs. ARG_VALUE is empty ] - %3$s", 
+						this.procname,
+						"RUNNING",
+						"PASS" ), 
+						LoggerElements.LOG_LEVEL1 );
+				
+				result = true;
+				return result;
+				
+			}
+			
+			
+			for( String argValue : ARG_VALUE )
+			{
+				String[] arrArgValue = argValue.split("=");
+
+				if( arrArgValue[1].charAt(0)  == '$' )					//전문 값 일경우 parsedTelegram에서 값 셋팅
+				{
+					arrArgValue[1] = arrArgValue[1].replace("$", "");
+					arrArgValue[1] = arrArgValue[1].replace("{", "");
+					arrArgValue[1] = arrArgValue[1].replace("}", "");
+
+					arrArgValue[1] = parsedTelegram.get(arrArgValue[1]) != null ?  new String( parsedTelegram.get(arrArgValue[1]) ) : "";
+				}
+
+				parsedTelegram.put( arrArgValue[0], arrArgValue[1].getBytes() );
+
+			}
+			
+			
+			result = true;
+			return result;
+		}
+		catch (Exception e) 
+		{
+			Logger.error( e );
+			return false;
+		}
+		finally
+		{
+
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][settingMethodArgs. RULE_ID : '%3$s' , FUNC_SUB_ID : '%4$s'] - %5$s", 
+					this.procname,
+					(result ? "RUNNING" : "ERROR"),
+					DETCH_RULE,
+					FUNC_SUB_ID,
+					(result ? "SUCCESS" : "FAIL")), 
+					LoggerElements.LOG_LEVEL1 );
+		}
+	}
+
+
+
+
+
+
+
+	//집계 함수에 저장된 쿼리문 실행
+	private boolean insertRuleMethod( LinkedHashMap<String, byte[]> parsedTelegram , String DETCH_RULE , String[] BIND_ARGS , String query , String FUNC_SUB_ID)
+	{
+		boolean result = false;
+		PreparedStatement psmt = null;
+		try 
+		{
+			
+			if( BIND_ARGS == null
+					|| BIND_ARGS.length == 0 )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][insertRuleMethod. BIND_ARGS is empty ] - %3$s", 
+						this.procname,
+						"RUNNING",
+						"PASS" ), 
+						LoggerElements.LOG_LEVEL1 );
+				
+				result = true;
+				return result;
+				
+			}
+			
+			if( query == null
+					|| query.equals("") )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][insertRuleMethod. query is null ] - %3$s", 
+						this.procname,
+						"ERROR",
+						"FAIL" ), 
+						LoggerElements.LOG_LEVEL1 );
+				
+				result = true;
+				return result;
+				
+			}
+			
+			
+			
+			psmt = this.oracleConn.prepareStatement( query );
+			int index = 1;
+			for( String bindArg : BIND_ARGS )
+			{
+				psmt.setString(index++, parsedTelegram.get(bindArg) != null ?  new String( parsedTelegram.get(bindArg) ) : "");
+			}
+
+			if( psmt.executeUpdate() < 0 )
+			{
+
+				return result;
+			}
+
+
+			result = true;
+			return result;
+		}
+		catch (Exception e) 
+		{
+			Logger.error( e );
+			return false;
+		}
+		finally
+		{
+			if( psmt != null )
+			{
+				try { psmt.close(); } catch (SQLException e) { Logger.error( e ); }
+				psmt = null;
+			}
+
+
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][insertRuleMethod. RULE_ID : '%3$s' , FUNC_SUB_ID : '%4$s' execute Query ] - %5$s", 
+					this.procname,
+					(result ? "RUNNING" : "ERROR"),
+					DETCH_RULE,
+					FUNC_SUB_ID,
+					(result ? "SUCCESS" : "FAIL")), 
+					LoggerElements.LOG_LEVEL1 );
+		}
+	}
+
+
+
+
+
+
+
+
+	private boolean initTelegram()
+	{
+		boolean result = false;
+
+		try
+		{
+			if ( this.protocolJarFileName == null || 
+					this.protocolJarFileName.trim().equals( "" ) ||
+					this.classLoader == null )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][Init telegram. Jar file or classloader is not available. ] - FAIL", 
+						this.procname,
+						"ERROR" ), 
+						LoggerElements.LOG_LEVEL1 );
+				return result;
+			}
+
+
+			if ( !this.classLoader.loadFile( this.protocolJarFileName ) )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][Init telegram. Do not load jar file. ] - FAIL", 
+						this.procname,
+						"ERROR" ), 
+						LoggerElements.LOG_LEVEL1 );
+				return result;
+			}
+
+
+			if ( !this.classLoader.loadClassesAll() )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][Init telegram. Do not load class file in jar. ] - FAIL", 
+						this.procname,
+						"ERROR" ), 
+						LoggerElements.LOG_LEVEL1 );
+				return result;
+			}
+
+
+			this.inboundTelegram = ( IF_PROTOCOL )this.classLoader.getClassInstance( this.inboundProtocolClassname );
+			if ( !this.inboundTelegram.init(
+					Manager.DB_TYPE_NAME,
+					Manager.DB_IPS,
+					Manager.DB_PORTS,
+					Manager.DB_NAME,
+					Manager.DB_USER,
+					Manager.DB_PW,
+					this.inboundProtocolName,
+					this.inboundProtocolVersion ) )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][Init telegram. Inbound telegram init failed. ] - FAIL", 
+						this.procname,
+						"ERROR" ), 
+						LoggerElements.LOG_LEVEL1 );
+				return result;
+			}
+
+
+			this.inboundTelegramFormat = this.inboundTelegram.getTelegramStruct();
+			if ( this.inboundTelegramFormat == null )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][Init telegram. Inbound telegram format is null. ] - FAIL", 
+						this.procname,
+						"ERROR" ), 
+						LoggerElements.LOG_LEVEL1 );
+				return result;
+			}
+
+
+			result = true;
+			return result;
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+			return false;
+		}
+		finally
+		{
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][Init telegram. Inbound telegram '%3$s' ] - %4$s", 
+					this.procname,
+					( result ? "RUNNING" : "ERROR" ), 
+					( this.inboundTelegram != null ? this.inboundTelegram.getTelegramName() : "N/A" ),
+					( result ? "SUCCESS" : "FAIL" ) ), 
+					LoggerElements.LOG_LEVEL1 );
+		}
+	}
+
+
+	private void releaseTelegram()
+	{
+		try
+		{
+			if ( this.inboundTelegram != null )
+				this.inboundTelegram.release();
+
+			if ( this.classLoader != null )
+				this.classLoader.release();
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+			return;
+		}
+		finally
+		{
+			this.inboundTelegram 		= null;
+			this.inboundTelegramFormat 	= null;
+			this.classLoader 			= null;
+
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][Release telegram and classloader. ]", 
+					this.procname,
+					"RUNNING" ), 
+					LoggerElements.LOG_LEVEL1 );
+		}
+	}
+
+
+	private LinkedHashMap<String, byte[]> parsingTelegram( IF_MessageDataSet telegramDataSet )
+	{
+		LinkedHashMap<String, byte[]> result = null;
+		long startT = 0;
+
+		try
+		{
+			startT = System.currentTimeMillis();
+
+			if ( telegramDataSet == null )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][Parsing telegram. Telegram dataset is null. ] - FAIL", 
+						this.procname,
+						"ERROR" ),
+						LoggerElements.LOG_LEVEL1 );
+				return result;
+			}
+
+			byte[] packet = telegramDataSet.getSourcePacket();
+			if ( packet == null )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][Parsing telegram. Source packet is null. ] - FAIL", 
+						this.procname,
+						"ERROR" ),
+						LoggerElements.LOG_LEVEL1 );
+				return result;
+			}
+
+
+			result = this.inboundTelegram.parsingTelegram( this.getProcname(), packet );
+			return result;
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+			return null;
+		}
+		finally
+		{
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][Parsing the telegram. Elapsed.time %3$d msec. Result '%4$s' ] - %5$s", 
+					this.procname,
+					( result != null && result.size() > 0 	? "RUNNING" : "ERROR" ), 
+					( System.currentTimeMillis() - startT ),
+					( result != null 						? result 	: "N/A" ), 
+					( result != null && result.size() > 0 	? "SUCCESS" : "FAIL") ), 
+					LoggerElements.LOG_LEVEL1 );
+		}
+	}
+
+
+	private boolean settingConfig()
+	{
+		boolean result 	= false;
+
+		String tmpStr 	= null;
+		int tmpInt		= -1;
+
+		try
+		{
+			/**
+			 * Thread delay
+			 */
+			tmpStr = Manager.CONF_MAP.get( "generator.mq.check.interval" );
+			tmpInt = ( tmpStr != null ) ? Integer.parseInt( tmpStr ) : -1;
+			if ( tmpInt < 0 )
+				return result;
+			this.threadDelay = tmpInt;
+
+
+			/**
+			 * Inboud telegram info
+			 */
+			tmpStr = Manager.CONF_MAP.get( "protocol.stack.jar" );
+			if ( tmpStr == null )
+				return result;
+			this.protocolJarFileName = tmpStr;
+
+			tmpStr = Manager.CONF_MAP.get( "inbound.protocol.classname" );
+			if ( tmpStr == null )
+				return result;
+			this.inboundProtocolClassname = tmpStr;
+
+			tmpStr = Manager.CONF_MAP.get( "inbound.protocol.name" );
+			if ( tmpStr == null )
+				return result;
+			this.inboundProtocolName = tmpStr;
+
+			tmpStr = Manager.CONF_MAP.get( "inbound.protocol.version" );
+			if ( tmpStr == null )
+				return result;
+			this.inboundProtocolVersion = tmpStr;
+
+
+			/**
+			 * oracle config
+			 */
+			tmpStr = Manager.CONF_MAP.get( "oracle.db.ips" );
+			if ( tmpStr == null )
+				return result;
+			this.ORACLE_IP = tmpStr;
+
+			tmpStr = Manager.CONF_MAP.get( "oracle.db.name" );
+			if ( tmpStr == null )
+				return result;
+			this.ORACLE_DB_NAME = tmpStr;
+
+			tmpStr = Manager.CONF_MAP.get( "oracle.db.ports" );
+			if ( tmpStr == null )
+				return result;
+			this.ORACLE_PORT = tmpStr;
+
+			tmpStr = Manager.CONF_MAP.get( "oracle.db.pw" );
+			if ( tmpStr == null )
+				return result;
+			this.ORACLE_PW = tmpStr;
+
+			tmpStr = Manager.CONF_MAP.get( "oracle.db.type" );
+			if ( tmpStr == null )
+				return result;
+			this.ORACLE_TYPE = tmpStr;
+
+			tmpStr = Manager.CONF_MAP.get( "oracle.db.user" );
+			if ( tmpStr == null )
+				return result;
+			this.ORACLE_USER = tmpStr;
+
+
+			/**
+			 * MariaDB session check interval
+			 */
+			tmpStr = Manager.CONF_MAP.get( "generator.mariadb.session.check.interval.ms" );
+			tmpInt = ( tmpStr != null ) ? Integer.parseInt( tmpStr ) : 5000;
+			if ( tmpInt < 0 )
+				return result; 
+			this.dbSessionCheckIntervalMs = tmpInt;
+
+
+
+
+
+			tmpStr = Manager.CONF_MAP.get( "bl.func.id.list" );
+			if ( tmpStr == null )
+				return result;
+			this.BL_FUNC_ID_LIST = tmpStr;
+
+			tmpStr = Manager.CONF_MAP.get( "blx.func.id.list" );
+			if ( tmpStr == null )
+				return result;
+			this.BLX_FUNC_ID_LIST = tmpStr;
+
+			tmpStr = Manager.CONF_MAP.get( "plcy.func.id.list" );
+			if ( tmpStr == null )
+				return result;
+			this.PLCY_FUNC_ID_LIST = tmpStr;
+
+
+			result = true;
+			return result;
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+			return false;
+		}
+		finally
+		{
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][Setting config data to memory. ] - %3$s", 
+					this.getProcname(), 
+					( result ? "RUNNING" : "ERROR" ),
+					( result ? "SUCCESS" : "FAIL" ) ), 
+					LoggerElements.LOG_LEVEL1 );
+		}
+	}
+
+
+	public boolean initMariaDBConn()
+	{
+		boolean result = false;
+
+		try
+		{
+			if ( !Manager.CONF_DB_TYPE.trim().toUpperCase().equals("MARIADB") ) 
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][Init MariaDB connection. Database type is not MariaDB. ] - FAIL", 
+						this.procname, 
+						"ERROR" ), 
+						LoggerElements.LOG_LEVEL1 );
+				return result;
+			}
+
+			if ( this.mariaDbHandler == null )
+				this.mariaDbHandler = new MariaDBHandler();
+
+			if ( !this.mariaDbHandler.init(
+					Manager.CONF_DB_IPS,
+					Manager.CONF_DB_PORTS,
+					Manager.CONF_DB_NAME,
+					Manager.CONF_DB_USER,
+					Manager.CONF_DB_PW ) )
+				return result;
+
+			if ( !this.mariaDbHandler.connect() )
+				return result;
+
+			this.mariaConn = this.mariaDbHandler.getConn();
+			if ( this.mariaConn == null )
+				return result;
+
+			result = true;
+			return result;
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+			return false;
+		}
+		finally
+		{
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][Init MariaDB connection. ] - %3$s", 
+					this.procname, 
+					( result ? "RUNNING" : "ERROR" ),
+					( result ? "SUCCESS" : "FAIL" ) ), 
+					LoggerElements.LOG_LEVEL1 );
+		}
+	}
+
+
+
+
+
+
+	public boolean initOracleDBConn()
+	{
+		boolean result = false;
+
+		try
+		{
+			if ( !this.ORACLE_TYPE.trim().toUpperCase().equals("ORACLE") ) 
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][Init Oracle DB connection. Database type is not Oracle DB. ] - FAIL", 
+						this.procname, 
+						"ERROR" ), 
+						LoggerElements.LOG_LEVEL1 );
+				return result;
+			}
+
+			if ( this.oracleDbHandler == null )
+				this.oracleDbHandler = new OracleDBHandler();
+
+			if ( !this.oracleDbHandler.init(
+					this.ORACLE_IP,
+					this.ORACLE_PORT,
+					this.ORACLE_DB_NAME,
+					this.ORACLE_USER,
+					this.ORACLE_PW ) )
+				return result;
+
+			if ( !this.oracleDbHandler.connect() )
+				return result;
+
+			this.oracleConn = this.oracleDbHandler.getConn();
+			if ( this.oracleConn == null )
+				return result;
+
+			result = true;
+			return result;
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+			return false;
+		}
+		finally
+		{
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][Init Oracle DB connection. ] - %3$s", 
+					this.procname, 
+					( result ? "RUNNING" : "ERROR" ),
+					( result ? "SUCCESS" : "FAIL" ) ), 
+					LoggerElements.LOG_LEVEL1 );
+		}
+	}
+
+
+
+
+
+	public void releaseMariaDBConn()
+	{
+		try
+		{
+			if ( !Manager.CONF_DB_TYPE.trim().toUpperCase().equals("MARIADB") ) 
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][Release MariaDB connection. Database type is not MariaDB. ] - FAIL", 
+						this.procname, 
+						"ERROR" ), 
+						LoggerElements.LOG_LEVEL1 );
+				return;
+			}
+
+			if ( this.mariaDbHandler != null )
+				this.mariaDbHandler.disconnect();
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+			return;
+		}
+		finally
+		{
+			this.mariaDbHandler = null;
+
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][Release MariaDB connection. ]", 
+					this.procname, 
+					"RUNNING"), 
+					LoggerElements.LOG_LEVEL1);
+		}
+	}
+
+
+
+
+	public void releaseOracleDBConn()
+	{
+		try
+		{
+			if ( !this.ORACLE_TYPE.trim().toUpperCase().equals("ORACLE") ) 
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][Release Oracle connection. Database type is not Oracle. ] - FAIL", 
+						this.procname, 
+						"ERROR" ), 
+						LoggerElements.LOG_LEVEL1 );
+				return;
+			}
+
+			if ( this.oracleDbHandler != null )
+				this.oracleDbHandler.disconnect();
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+			return;
+		}
+		finally
+		{
+			this.oracleDbHandler = null;
+
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][Release Oracle connection. ]", 
+					this.procname, 
+					"RUNNING"), 
+					LoggerElements.LOG_LEVEL1);
+		}
+	}
+
+
+	public boolean initMariaSql()
+	{
+		boolean result = false;
+
+		try
+		{
+			if ( this.mariaConn == null )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][Init mariaDB business-sql. Connection is null. ] - FAIL", 
+						this.procname, 
+						"ERROR" ), 
+						LoggerElements.LOG_LEVEL1);
+				return result;
+			}
+
+
+			this.mariaPsmtArr = new PreparedStatement[1];
+
+			this.mariaPsmtArr[0] = this.mariaConn.prepareStatement( BusinessQuery.SELECT_RULE_FUNC );		// RULE 집계함수 info
+
+
+
+			for ( int i=0; i<this.mariaPsmtArr.length; i++ )
+			{
+				if ( this.mariaPsmtArr[i] == null )
+				{
+					Logger.sysInfo(String.format(
+							"[%1$-20s][%2$-10s][Init mariaDB business-sql. PreparedStatement[%3$d] is null. ] - FAIL", 
+							this.procname, 
+							"ERROR",
+							i ), 
+							LoggerElements.LOG_LEVEL1 );
+					return result;
+				}
+			}
+
+
+			result = true;
+			return result;
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+			return false;
+		}
+		finally
+		{
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][Init mariaDB business-sql '%3$s'. ] - %4$s", 
+					this.procname, 
+					( result ? "RUNNING" : "ERROR" ),
+					this.getClass().getName(),
+					( result ? "SUCCESS" : "FAIL" ) ), 
+					LoggerElements.LOG_LEVEL1);
+		}
+	}
+
+
+
+
+
+	public boolean initOracleSql()
+	{
+		boolean result = false;
+
+		try
+		{
+			if ( this.oracleConn == null )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][Init Oracle business-sql. Connection is null. ] - FAIL", 
+						this.procname, 
+						"ERROR" ), 
+						LoggerElements.LOG_LEVEL1);
+				return result;
+			}
+
+
+			this.oraclePsmtArr = new PreparedStatement[4];
+
+			this.oraclePsmtArr[0] = this.oracleConn.prepareStatement( BusinessQuery.INSERT_WCFFD114TH );		// 온라인 인증 내역 insert
+			this.oraclePsmtArr[1] = this.oracleConn.prepareStatement( BusinessQuery.INSERT_WCFFD114TF );		// 온라인인증판정악성앱상세내역 insert
+			this.oraclePsmtArr[2] = this.oracleConn.prepareStatement( BusinessQuery.INSERT_WCFFD122TH );		// 온라인 ALERT 등록 insert
+			this.oraclePsmtArr[3] = this.oracleConn.prepareStatement( BusinessQuery.SELECT_WCFFD402TH );		// 온라인 예외정책 select
+
+
+			for ( int i=0; i<this.oraclePsmtArr.length; i++ )
+			{
+				if ( this.oraclePsmtArr[i] == null )
+				{
+					Logger.sysInfo(String.format(
+							"[%1$-20s][%2$-10s][Init Oracle business-sql. PreparedStatement[%3$d] is null. ] - FAIL", 
+							this.procname, 
+							"ERROR",
+							i ), 
+							LoggerElements.LOG_LEVEL1 );
+					return result;
+				}
+			}
+
+
+			result = true;
+			return result;
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+			return false;
+		}
+		finally
+		{
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][Init Oracle business-sql '%3$s'. ] - %4$s", 
+					this.procname, 
+					( result ? "RUNNING" : "ERROR" ),
+					this.getClass().getName(),
+					( result ? "SUCCESS" : "FAIL" ) ), 
+					LoggerElements.LOG_LEVEL1);
+		}
+	}
+
+
+	public void releaseMariaSql()
+	{
+		try
+		{
+			if ( this.mariaPsmtArr != null )
+			{
+				for ( int i=0; i<this.mariaPsmtArr.length; i++ )
+					this.mariaPsmtArr[i].close();
+			}
+
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+		}
+		finally
+		{
+			this.mariaPsmtArr = null;
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][Released MariaDB business-query. ] - SUCCESS", 
+					this.procname, 
+					"RUNNING" ), 
+					LoggerElements.LOG_LEVEL1 );
+		}
+	}
+
+
+	public void releaseOracleSql()
+	{
+		try
+		{
+			if ( this.oraclePsmtArr != null )
+			{
+				for ( int i=0; i<this.oraclePsmtArr.length; i++ )
+					this.oraclePsmtArr[i].close();
+			}
+
+		}
+		catch ( Exception e )
+		{
+			Logger.error( e );
+		}
+		finally
+		{
+			this.oraclePsmtArr = null;
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][Released Oracle business-query. ] - SUCCESS", 
+					this.procname, 
+					"RUNNING" ), 
+					LoggerElements.LOG_LEVEL1 );
+		}
+	}
+}

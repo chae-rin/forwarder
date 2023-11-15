@@ -1,0 +1,178 @@
+package com.illootech.forwarder.common.ruleMethod;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import java.text.DateFormat;
+import java.text.SimpleDateFormat;
+import java.util.Calendar;
+import java.util.Date;
+import java.util.LinkedHashMap;
+import java.util.UUID;
+
+import com.acidhan.frameworks.file.log.Logger;
+import com.acidhan.frameworks.file.log.LoggerElements;
+import com.illootech.forwarder.common.ruleInformation;
+import com.illootech.forwarder.common.repository.BusinessQuery;
+
+
+public class InsertBL {
+	private Connection oracleConn = null;
+	private LinkedHashMap<String, byte[]> parsedTelegram = null;
+	private PreparedStatement psmt = null;
+
+	private final String[] DST_DSCD = { "06","02","01" };
+	
+	public InsertBL( Connection oracleConn , LinkedHashMap<String, byte[]> parsedTelegram )
+	{
+
+		this.oracleConn = oracleConn;
+		this.parsedTelegram = parsedTelegram;
+
+	}
+	
+	
+	
+	private boolean initSQL()
+	{
+		boolean result = false;
+		
+		try 
+		{
+			if( this.oracleConn == null )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][initSQL. DB connection is null ] - FAIL", 
+						"BLINSERT",
+						"ERROR" ), 
+						LoggerElements.LOG_LEVEL1 );
+				
+				return false;
+			}
+			
+			this.psmt = this.oracleConn.prepareStatement( BusinessQuery.INSERT_WCFFD120TH );
+			
+			
+			result = true;
+			return result;
+			
+		}
+		catch (Exception e) 
+		{
+			Logger.error( e );
+			return false;
+		}
+		
+	}
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	public boolean insertWCFFD120TH()
+	{
+		boolean result = false;
+		
+		try 
+		{
+			if( !this.initSQL() )
+				return false;
+			
+			if( this.psmt == null )
+			{
+				Logger.sysInfo(String.format(
+						"[%1$-20s][%2$-10s][insertWCFFD120TH. PreparedStatement is null ] - FAIL", 
+						"BLINSERT",
+						"ERROR" ), 
+						LoggerElements.LOG_LEVEL1 );
+				
+				return false;
+			}
+			
+			Calendar cal = Calendar.getInstance();
+			cal.setTime( new Date() );
+			DateFormat df  = new SimpleDateFormat("yyyyMMddHHmmss");
+			
+			
+			String stDayHour = df.format(cal.getTime());
+			
+			int aplyTerm = this.parsedTelegram.get("MTHD_APLY_TERM") != null ? Integer.parseInt( new String( this.parsedTelegram.get("MTHD_APLY_TERM") ) ) : 0; 
+			
+			cal.add(Calendar.DATE, aplyTerm);
+			String edDayHour = df.format(cal.getTime());
+			
+			
+			for(int i = 0 ; i < this.DST_DSCD.length ; i++)
+			{
+				String blocListTgtTpTmp = this.parsedTelegram.get("MTHD_BLOC_LIST_TGT_TP") != null ? new String( this.parsedTelegram.get("MTHD_BLOC_LIST_TGT_TP") ) : ""; 
+				String blocListTgtTp = this.parsedTelegram.get("MTHD_BLOC_LIST_TGT_TP") != null ? new String( this.parsedTelegram.get("MTHD_BLOC_LIST_TGT_TP") ) : "";
+				if( this.DST_DSCD[i].equals("06") )				// 승인계
+				{
+					if( blocListTgtTp.equals("01") )		// 카드번호
+						continue;
+				}
+				else if( this.DST_DSCD[i].equals("02") )			// W-pay
+				{
+					continue;
+				}
+				else if( this.DST_DSCD[i].equals("01") )			// VP
+				{
+					if     (blocListTgtTp.equals("01")) blocListTgtTpTmp = "06"; 	//카드번호
+					else if(blocListTgtTp.equals("02")) continue;             		//고객번호
+					else if(blocListTgtTp.equals("03")) blocListTgtTpTmp = "05"; 	//IP
+					else if(blocListTgtTp.equals("04")) blocListTgtTpTmp = "02"; 	//MAC
+					else if(blocListTgtTp.equals("05")) blocListTgtTpTmp = "03"; 	//HDD
+					else if(blocListTgtTp.equals("06")) continue;					////UUID			
+				}
+				
+				int index = 1 ;
+				this.psmt.setString(index++, UUID.randomUUID().toString().replaceAll("-", ""));
+				this.psmt.setString(index++, this.parsedTelegram.get("MTHD_BLOC_LIST_TP") != null ? new String( this.parsedTelegram.get("MTHD_BLOC_LIST_TP") ) : "");
+				this.psmt.setString(index++, blocListTgtTpTmp);
+				this.psmt.setString(index++, this.parsedTelegram.get("MTHD_TGT_VAL") != null ? new String( this.parsedTelegram.get("MTHD_TGT_VAL") ) : "");
+				this.psmt.setString(index++, this.DST_DSCD[i]);
+				this.psmt.setString(index++, "01");
+				this.psmt.setString(index++, stDayHour);
+				this.psmt.setString(index++, edDayHour);
+				
+				if( this.psmt.executeUpdate() < 1 )
+					return result;
+				
+			}
+			
+			
+			
+			result = true;
+			return result;
+			
+		}
+		catch (Exception e) 
+		{
+			Logger.error( e );
+			return false;
+		}
+		finally
+		{
+			if( this.psmt != null )
+			{
+				try { this.psmt.close(); } catch (SQLException e) { Logger.error( e );	}
+				this.psmt = null;
+			}
+			
+			if( this.oracleConn != null ) 
+				this.oracleConn = null;
+			
+			Logger.sysInfo(String.format(
+					"[%1$-20s][%2$-10s][insertWCFFD120TH. execute Insert Query ] - %3$s", 
+					"BLINSERT",
+					(result ? "RUNNING" : "ERROR"),
+					(result ? "SUCCESS" : "FAIL")), 
+					LoggerElements.LOG_LEVEL1 );
+		}
+	}
+	
+}

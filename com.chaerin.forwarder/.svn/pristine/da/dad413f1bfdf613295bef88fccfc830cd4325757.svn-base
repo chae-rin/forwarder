@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<project name="com.illootech.forwarder" default="prepare">
+
+    <!-- ==================================== -->
+    <!--Property define-->
+    <!-- ==================================== -->
+    <tstamp>
+        <format property="DSTAMP" pattern="yyyyMMdd"/>
+        <format property="TSTAMP" pattern="HHmmss"/>
+    </tstamp>
+    
+    <property name="base.dir"	value="./"/>
+    <property name="lib.dir" 	value="lib"/>
+    <property name="dist.dir" 	value="dist"/>
+    <property name="build.dir" 	value="bin"/>
+    <property name="src.dir" 	value="src"/>
+    <property name="jar.file" 	value="com.illootech.forwarder.jar"/>
+	
+	
+	
+	<!-- ==================================== -->
+	<!-- Define Libray path..............-->
+	<!-- ==================================== -->
+	<property name="protocol"			value="/app/ursa/common.lib/com.acidhan.protocol.adapter.jar"/>
+	<property name="framework" 			value="/app/ursa/common.lib/com.acidhan.framework.v4_3.jar"/>
+	<property name="kafkaclient" 		value="/app/ursa/common.lib/kafka-clients-3.0.0.jar"/>
+	<property name="kafkalogappender" 	value="/app/ursa/common.lib/kafka-log4j-appender-3.0.0.jar"/>
+	<property name="util"	 			value="/app/ursa/common.lib/com.illootech.util.jar"/>
+	<property name="slf4j-api"	 		value="/app/ursa/common.lib/slf4j-api-1.7.25.jar"/>
+	<property name="log4j1"	 			value="/app/ursa/common.lib/log4j-core-2.17.0.jar"/>
+	<property name="log4j2"	 			value="/app/ursa/common.lib/log4j-api-2.17.0.jar"/>
+	<property name="log4j3"	 			value="/app/ursa/common.lib/log4j-slf4j-impl-2.17.0.jar"/>
+		
+	
+	
+	<echo message="Initializing paths :  started at : ${DSTAMP}-${TSTAMP}"/>
+    <!-- ==================================== -->
+    <!-- Check environments..............-->
+    <!-- ==================================== -->
+	<target name="check.env">
+	    <available property="no.dist.dir"	file="${dist.dir}"	type="dir"/>
+		<available property="no.lib.dir" 	file="${lib.dir}" 	type="dir"/>
+	</target>
+	
+	<target name="create.dist.dir" unless="no.dist.dir">
+	    <echo message=" Create dist directory"/>
+	    <mkdir dir="${dist.dir}"/>
+	</target>
+	
+	<target name="create.lib.dir" unless="no.lib.dir">
+		<echo message=" Create lib directory"/>
+		<mkdir dir="${lib.dir}"/>
+	</target>
+	
+	
+	
+	<!-- ==================================== -->
+    <!-- Propared-->
+	<!-- ==================================== -->
+    <target name="prepare" depends="check.env">
+        <echo message="Build started at : ${DSTAMP}-${TSTAMP}"/>
+		<antcall target="create.dist.dir"></antcall>
+		<antcall target="create.lib.dir"></antcall>
+    </target>
+    
+	
+    
+	<!-- ==================================== -->
+    <!-- Clear - Delete Dir-->
+	<!-- ==================================== -->
+    <target name="clean">
+        <delete>
+            <fileset dir="${dist.dir}">
+            	<include name="*"/>
+            </fileset>
+        </delete>
+        <echo message="Deleted files - ${dist.dir}/all folder and files"/>
+    </target>
+    
+    
+    
+	<!-- ==================================== -->
+    <!-- Compile -->
+	<!-- ==================================== -->
+    <target name="compile">
+        <mkdir dir="${build.dir}"/>
+        <javac deprecation="off" srcdir="${src.dir}" destdir="${build.dir}" listfiles="no" failonerror="true"></javac>
+    	<echo message="Compiled source files"/>
+    </target>
+    
+	
+    
+	<!-- ==================================== -->
+    <!-- Make Jar File -->
+	<!-- ==================================== -->
+    <target name="mkjar">     
+        <mkdir dir="${dist.dir}"/>
+        <manifest file="ILL.FORWARDER.MF">
+            <attribute name="Built-By" 		value="hanGyu, Lee"/>
+            <attribute name="Main-Class" 	value="com.illootech.forwarder.BootStrap"/>
+        	<attribute name="Class-Path" 	value="${protocol} ${framework} ${kafkaclient} ${kafkalogappender} ${util} ${slf4j-api} ${log4j1} ${log4j2} ${log4j3}"/>
+        </manifest>
+        <jar
+            destfile="${dist.dir}/${jar.file}" basedir="${build.dir}"
+            manifest="ILL.FORWARDER.MF"
+        />
+    </target>
+    
+    
+    
+	<!-- ==================================== -->
+    <!-- Dist -->
+	<!-- ==================================== -->
+	<target name="dist">
+		<!-- copy properties file to base dir -->
+        <copy todir="${dist.dir}/">
+            <fileset file="${base.dir}/*.properties"/>
+        </copy>
+    </target>
+	
+</project>
