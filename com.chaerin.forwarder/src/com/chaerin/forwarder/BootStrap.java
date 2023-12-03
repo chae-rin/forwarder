@@ -14,6 +14,7 @@ public class BootStrap {
 	private Manager manager = null;
 	public static String PROC_ID = null; 
 
+	public static Properties config = null;
 	public static Logger logger = Logger.getLogger("myLog");
 	
 	
@@ -93,7 +94,6 @@ public class BootStrap {
 		boolean result = false;
 		
 		FileHandler fhandler = null;
-		Properties config = null;
 		
 		try
 		{
